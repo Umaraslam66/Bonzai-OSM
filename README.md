@@ -23,6 +23,7 @@ World-scale OpenStreetMap ingestion and preprocessing for a generative "map LLM"
 
 - [PROJECT.md](./PROJECT.md): project log, decisions, verified Leonardo state
 - [commands.md](./commands.md): copy-paste operational commands
+- [docs/LUXEMBOURG_TEST.md](./docs/LUXEMBOURG_TEST.md): complete analysis of the first validated regional test on Leonardo
 - [scripts/leonardo_cleanup.sh](./scripts/leonardo_cleanup.sh): safe cleanup helper
 - [scripts/leonardo_download_planet.sh](./scripts/leonardo_download_planet.sh): datamover-based planet download helper
 - [jobs/luxembourg_probe.sbatch](./jobs/luxembourg_probe.sbatch): free `lrd_all_serial` GDAL probe job
@@ -39,3 +40,5 @@ World-scale OpenStreetMap ingestion and preprocessing for a generative "map LLM"
 ## Next Step
 
 Prototype the parsing pipeline on a small Geofabrik extract such as Luxembourg or Iceland using GDAL on `lrd_all_serial`. Do not start full-planet custom extraction until the region probe succeeds or `osmium` is installed.
+
+The Luxembourg validation is now complete through the first roads extraction. Read [docs/LUXEMBOURG_TEST.md](./docs/LUXEMBOURG_TEST.md) for the exact commands, job IDs, outputs, failures, fixes, and conclusions.
