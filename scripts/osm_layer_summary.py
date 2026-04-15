@@ -164,8 +164,13 @@ def collect_layer_summary(layer, sample_limit: int):
         "feature_count": layer_count,
         "extent": extent_summary,
         "fields": field_defs,
+        "field_names": field_names,
         "non_null_field_counts": dict(sorted(non_null_counts.items())),
         "other_tags_key_counts": dict(sorted(other_tag_key_counts.items())),
+        "top_other_tag_keys": [
+            {"key": key, "count": count}
+            for key, count in other_tag_key_counts.most_common(20)
+        ],
         "samples": samples,
         "derived_counts": {
             "road_like_features": road_count,
@@ -210,14 +215,28 @@ def build_summary(input_path: Path, sample_limit: int) -> dict:
     feature_class_counts["edge_like_features"] = feature_class_counts["line_features"]
     feature_class_counts["area_like_features"] = feature_class_counts["multipolygon_features"]
 
+    known_primary_layers = {"points", "lines", "multipolygons"}
+    layer_names = [layer["name"] for layer in layer_summaries]
+    extra_layers = [
+        {
+            "name": layer["name"],
+            "geometry_type": layer["geometry_type"],
+            "feature_count": layer["feature_count"],
+        }
+        for layer in layer_summaries
+        if layer["name"] not in known_primary_layers
+    ]
+
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "input_path": str(input_path),
         "driver": dataset.GetDriver().GetName(),
         "layer_count": dataset.GetLayerCount(),
+        "layer_names": layer_names,
         "total_features": total_features,
         "feature_class_counts": feature_class_counts,
         "derived_theme_counts": dict(sorted(derived_theme_counts.items())),
+        "extra_layers": extra_layers,
         "notes": [
             "node_like_features and edge_like_features are layer-level proxies from GDAL OSM output, not raw OSM primitive counts.",
             "poi_like_features are heuristic counts based on common POI tags in explicit fields and parsed other_tags.",
