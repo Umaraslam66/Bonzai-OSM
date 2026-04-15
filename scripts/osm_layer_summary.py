@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from osgeo import ogr
+from osgeo import gdal, ogr
 
 
 POI_KEYS = {
@@ -93,6 +93,7 @@ def collect_layer_summary(layer, sample_limit: int):
     layer_defn = layer.GetLayerDefn()
     field_defs = field_definition(layer_defn)
     field_names = [field["name"] for field in field_defs]
+    extent = layer.GetExtent(1)
 
     non_null_counts = Counter()
     other_tag_key_counts = Counter()
@@ -148,7 +149,6 @@ def collect_layer_summary(layer, sample_limit: int):
                 }
             )
 
-    extent = layer.GetExtent(can_force=1)
     extent_summary = None
     if extent:
         extent_summary = {
@@ -176,6 +176,8 @@ def collect_layer_summary(layer, sample_limit: int):
 
 
 def build_summary(input_path: Path, sample_limit: int) -> dict:
+    gdal.SetConfigOption("OGR_INTERLEAVED_READING", "YES")
+    ogr.DontUseExceptions()
     dataset = ogr.Open(str(input_path))
     if dataset is None:
         raise RuntimeError(f"Unable to open input dataset: {input_path}")
