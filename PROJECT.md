@@ -10,6 +10,36 @@
 
 ---
 
+## 0. New-Session Briefing
+
+If a new AI session starts from this file, the verified current state is:
+
+- Leonardo project/account: `AIFAC_P02_222`
+- Budget status last checked on 2026-04-15: `14 / 40000` local core-hours consumed
+- Legacy unrelated data was fully deleted on 2026-04-15
+  - `$WORK` reduced to ~`1.4M`
+  - `$FAST` reduced to `0k`
+- Full planet download completed and verified on 2026-04-15
+  - path: `/leonardo_scratch/large/userexternal/uaslam00/osm/raw/planet-latest.osm.pbf`
+  - upstream snapshot resolved to `planet-260406.osm.pbf`
+  - checksum: `planet-latest.osm.pbf: OK`
+- Leonardo currently exposes GDAL's OSM driver, but **no confirmed `osmium` module**
+- The first regional validation on Luxembourg succeeded on the free `lrd_all_serial` partition
+  - probe job: `39908193`
+  - roads extraction job: `39908360`
+  - artifact created: `/leonardo_scratch/large/userexternal/uaslam00/osm/extracts/luxembourg_roads.geojson`
+  - artifact size: `63M`
+- Current recommended path:
+  1. Continue regional prototyping with GDAL on `lrd_all_serial`
+  2. Extract Luxembourg/Iceland buildings and POIs next
+  3. Decide an ML-friendly intermediate format after the first few extracts
+  4. Do **not** use `dcgp_usr_prod` or `boost_usr_prod` for preprocessing
+- Repo handoff docs:
+  - `README.md`
+  - `docs/LUXEMBOURG_TEST.md`
+
+---
+
 ## 1. Goal (one paragraph)
 
 Download all of OpenStreetMap (planet + full history optionally), convert the dense PBF graph into a tokenised representation of roads, buildings, land-use, POIs, and topology, then run unsupervised pre-training so the model learns the statistical structure of "what the world looks like on a map." Downstream: generate synthetic maps / new plausible worlds, conditional generation ("draw a coastal Scandinavian town"), and region completion.
@@ -265,6 +295,18 @@ ogrinfo "$RAW" -so lines
 ogrinfo "$RAW" -so multipolygons
 ```
 
+What has already been proven after this plan was written:
+
+- Luxembourg extract downloaded successfully from Geofabrik
+- GDAL probe job `39908193` succeeded on `lrd_all_serial`
+- GDAL confirmed `points`, `lines`, and `multipolygons` layers
+- Luxembourg roads extraction job `39908360` succeeded
+- resulting artifact:
+  `/leonardo_scratch/large/userexternal/uaslam00/osm/extracts/luxembourg_roads.geojson`
+  with size `63M`
+
+So the next work is no longer "can GDAL read OSM on Leonardo?" That is already answered yes. The next work is extending the same pattern to buildings, POIs, and eventually a better intermediate format than GeoJSON.
+
 Future `osmium`-based extraction template once the tool is available:
 
 ```bash
@@ -307,12 +349,16 @@ Likely we'll prototype 2–3 on a small extract (say, Iceland or Luxembourg) and
 | A5 | Create clean OSM workspace skeleton under `$CINECA_SCRATCH/osm/` and `$WORK/osm/` | Umar | ✅ **done** 2026-04-15 | `raw/`, `extracts/`, `jobs/` created |
 | A6 | Download `planet-latest.osm.pbf` via Leonardo datamover | Umar | ✅ **done** 2026-04-15 | resolved to `planet-260406.osm.pbf`, checksum OK |
 | A7 | Probe available OSM modules on Leonardo | Umar | ✅ **done** 2026-04-15 | `gdal` and `proj` available, no `osmium` found |
-| A8 | Download Luxembourg and Iceland extracts for prototyping | Umar | **next** | Geofabrik via datamover |
-| A9 | Run first GDAL OSM probe on `lrd_all_serial` | Claude + Umar | **next** | use Luxembourg first |
-| A10 | Decide tokenisation scheme on Iceland/Luxembourg extract | Claude + Umar | later | §8.4 |
-| A11 | Email `superc@cineca.it` for $WORK quota bump once token size is known | Umar | later | |
-| A12 | Decide archive storage need | Umar | later | |
-| A13 | First end-to-end prototype run on small extract | Claude + Umar | later | |
+| A8 | Download Luxembourg extract for prototyping | Umar | ✅ **done** 2026-04-15 | Geofabrik via datamover |
+| A9 | Run first GDAL OSM probe on `lrd_all_serial` | Claude + Umar | ✅ **done** 2026-04-15 | Luxembourg job `39908193` |
+| A10 | Extract first real artifact from OSM | Claude + Umar | ✅ **done** 2026-04-15 | Luxembourg roads job `39908360`, output `63M` |
+| A11 | Download Iceland extract for a second regional prototype | Umar | **next** | Geofabrik via datamover |
+| A12 | Extract Luxembourg buildings and POIs on `lrd_all_serial` | Claude + Umar | **next** | continue GDAL-first prototype |
+| A13 | Decide tokenisation scheme on Luxembourg/Iceland extract outputs | Claude + Umar | later | §8.4 |
+| A14 | Decide compact intermediate format for extracted data | Claude + Umar | later | GeoJSON is fine for validation, likely not final |
+| A15 | Email `superc@cineca.it` for $WORK quota bump once token size is known | Umar | later | |
+| A16 | Decide archive storage need | Umar | later | |
+| A17 | First end-to-end prototype run on small extract | Claude + Umar | later | |
 
 ## 10. Budget linearization math
 
@@ -331,13 +377,13 @@ Likely we'll prototype 2–3 on a small extract (say, Iceland or Luxembourg) and
 | This month consumed             | 5 core-h                   |
 | Project window                  | 2026-03-11 → 2026-06-11    |
 
-**Disk state after cleanup and planet download (2026-04-15):**
+**Disk state after cleanup, planet download, and Luxembourg test (2026-04-15):**
 
 | Area             | Used     | Quota | Files  | Notes                                        |
 | ---------------- | -------- | ----- | ------ | -------------------------------------------- |
 | `$HOME`          | 19.54 GB | 50 GB | 3,348  | 39% full — trim before it fills up |
-| `$CINECA_SCRATCH`| ~86 GB   | ∞     | 3+     | planet file + checksum + workspace dirs |
-| `$WORK`          | 1.422 MB | 1 TB  | 22     | cleaned; only minimal repo/workspace state |
+| `$CINECA_SCRATCH`| ~86 GB+  | ∞     | 7+     | planet file + checksum + Luxembourg extract + roads artifact |
+| `$WORK`          | ~1.4 MB  | 1 TB  | 27+    | cleaned; minimal workspace/job files only |
 | `$FAST`          | 0 KB     | 1 TB  | 0      | completely cleared |
 | `$PUBLIC`        | 4 KB     | 50 GB | 1      | unused |
 
@@ -350,6 +396,10 @@ Likely we'll prototype 2–3 on a small extract (say, Iceland or Luxembourg) and
 - **2026-04-15 18:xx CET** — Legacy project trash was deleted for real. `cinQuota` now shows `$WORK=1.422M` and `$FAST=0k`, confirming a clean slate.
 - **2026-04-15 19:04 CET** — `planet-latest.osm.pbf` finished downloading through `data.leonardo.cineca.it` to `/leonardo_scratch/large/userexternal/uaslam00/osm/raw/planet-latest.osm.pbf`. Upstream redirected to `planet-260406.osm.pbf` (snapshot date 2026-04-06). `md5sum -c planet-latest.osm.pbf.md5` returned `OK`.
 - **2026-04-15 19:05 CET** — Module probe shows `gdal/3.8.5--gcc--12.2.0` and `proj/9.2.1--gcc--12.2.0-spack0.22`, but no `osmium` module. Short-term plan changed to GDAL-first region probes on `lrd_all_serial`.
+- **2026-04-15 19:24 CET** — Luxembourg regional extract downloaded successfully from Geofabrik to `/leonardo_scratch/large/userexternal/uaslam00/osm/raw/luxembourg-latest.osm.pbf`. Upstream redirect resolved to `luxembourg-260414.osm.pbf`.
+- **2026-04-15 19:3x CET** — First free probe job on Luxembourg succeeded: Slurm job `39908193` on `lrd_all_serial`. `ogrinfo` confirmed GDAL can open the `.osm.pbf` and sees the expected OSM layers `points`, `lines`, and `multipolygons`. `.err` was empty.
+- **2026-04-15 19:37 CET** — First real extracted artifact created on Leonardo without burning paid compute: Slurm job `39908360` produced `/leonardo_scratch/large/userexternal/uaslam00/osm/extracts/luxembourg_roads.geojson` at `63M`.
+- **2026-04-15 (later)** — Repo documentation was hardened for future sessions and collaborators. Added `README.md`, `docs/LUXEMBOURG_TEST.md`, helper scripts, and pushed the repo to `https://github.com/Umaraslam66/Bonzai-OSM` on branch `main`.
 
 ---
 
