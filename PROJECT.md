@@ -37,12 +37,14 @@ If a new AI session starts from this file, the verified current state is:
 - Current recommended path:
   1. Continue regional prototyping with GDAL on `lrd_all_serial`
   2. Use `GeoPackage` for prototype full-region exports for now
-  3. Extract Luxembourg/Iceland buildings and POIs next
-  4. If we want a real world-scale intermediate store, add a `GeoParquet`-capable toolchain
-  5. Do **not** use `dcgp_usr_prod` or `boost_usr_prod` for preprocessing
+  3. Generate machine-readable JSON summaries for regions so collaborators can inspect counts, properties, tags, and samples quickly
+  4. Extract Luxembourg/Iceland buildings and POIs next
+  5. If we want a real world-scale intermediate store, add a `GeoParquet`-capable toolchain
+  6. Do **not** use `dcgp_usr_prod` or `boost_usr_prod` for preprocessing
 - Repo handoff docs:
   - `README.md`
   - `docs/LUXEMBOURG_TEST.md`
+  - `docs/LUXEMBOURG_FORMAT_BENCHMARK.md`
 
 ---
 
@@ -326,6 +328,18 @@ Immediate interpretation:
 - `GeoJSON` and `GeoJSONSeq` are valid inspection/debug outputs, but too verbose to become the world-scale default
 - if we want `GeoParquet` for the real extracted world dataset, we need a different toolchain than the current system GDAL module
 
+New deliverable added for collaborator inspection:
+
+- `scripts/osm_layer_summary.py` generates one JSON file for a regional extract
+- it records:
+  - layer counts
+  - field definitions
+  - non-null property counts
+  - parsed `other_tags` key frequencies
+  - derived counts such as road-like, building-like, and POI-like features
+  - a few sample features per layer
+- `jobs/luxembourg_summary_json.sbatch` runs that summary on Luxembourg on the free `lrd_all_serial` partition
+
 Future `osmium`-based extraction template once the tool is available:
 
 ```bash
@@ -372,14 +386,15 @@ Likely we'll prototype 2–3 on a small extract (say, Iceland or Luxembourg) and
 | A9 | Run first GDAL OSM probe on `lrd_all_serial` | Claude + Umar | ✅ **done** 2026-04-15 | Luxembourg job `39908193` |
 | A10 | Extract first real artifact from OSM | Claude + Umar | ✅ **done** 2026-04-15 | Luxembourg roads job `39908360`, output `63M` |
 | A11 | Run full-data Luxembourg format benchmark | Claude + Umar | ✅ **done** 2026-04-15 | GeoJSON / GPKG / GeoJSONSeq succeeded; Parquet blocked by missing driver |
-| A12 | Download Iceland extract for a second regional prototype | Umar | **next** | Geofabrik via datamover |
-| A13 | Extract Luxembourg buildings and POIs on `lrd_all_serial` | Claude + Umar | **next** | continue GDAL-first prototype |
-| A14 | Decide tokenisation scheme on Luxembourg/Iceland extract outputs | Claude + Umar | later | §8.4 |
-| A15 | Decide compact intermediate format for extracted data | Claude + Umar | later | current best prototype format is GeoPackage; world-scale GeoParquet still blocked by toolchain |
-| A16 | Add a GeoParquet-capable export toolchain if needed | Claude + Umar | later | current GDAL module lacks `Parquet` driver |
-| A17 | Email `superc@cineca.it` for $WORK quota bump once token size is known | Umar | later | |
-| A18 | Decide archive storage need | Umar | later | |
-| A19 | First end-to-end prototype run on small extract | Claude + Umar | later | |
+| A12 | Generate Luxembourg JSON summary for collaborators | Claude + Umar | **next** | counts, properties, tags, sample records in one JSON file |
+| A13 | Download Iceland extract for a second regional prototype | Umar | **next** | Geofabrik via datamover |
+| A14 | Extract Luxembourg buildings and POIs on `lrd_all_serial` | Claude + Umar | **next** | continue GDAL-first prototype |
+| A15 | Decide tokenisation scheme on Luxembourg/Iceland extract outputs | Claude + Umar | later | §8.4 |
+| A16 | Decide compact intermediate format for extracted data | Claude + Umar | later | current best prototype format is GeoPackage; world-scale GeoParquet still blocked by toolchain |
+| A17 | Add a GeoParquet-capable export toolchain if needed | Claude + Umar | later | current GDAL module lacks `Parquet` driver |
+| A18 | Email `superc@cineca.it` for $WORK quota bump once token size is known | Umar | later | |
+| A19 | Decide archive storage need | Umar | later | |
+| A20 | First end-to-end prototype run on small extract | Claude + Umar | later | |
 
 ## 10. Budget linearization math
 
@@ -422,6 +437,7 @@ Likely we'll prototype 2–3 on a small extract (say, Iceland or Luxembourg) and
 - **2026-04-15 19:37 CET** — First real extracted artifact created on Leonardo without burning paid compute: Slurm job `39908360` produced `/leonardo_scratch/large/userexternal/uaslam00/osm/extracts/luxembourg_roads.geojson` at `63M`.
 - **2026-04-15 (later)** — Repo documentation was hardened for future sessions and collaborators. Added `README.md`, `docs/LUXEMBOURG_TEST.md`, helper scripts, and pushed the repo to `https://github.com/Umaraslam66/Bonzai-OSM` on branch `main`.
 - **2026-04-15 (later)** — Full-data Luxembourg format benchmark completed on `lrd_all_serial`: `GeoJSON` job `39908595` finished in `29s` with `349M` output, `GeoPackage` job `39908596` finished in `11s` with `280M` output, `GeoJSONSeq` job `39908600` finished in `23s` with `351M` output. `Parquet` job `39908598` failed immediately with `ERROR 1: Unable to find driver 'Parquet'`, confirming the system GDAL build does not currently support `Parquet` on Leonardo.
+- **2026-04-15 (later)** — Added `scripts/osm_layer_summary.py` and `jobs/luxembourg_summary_json.sbatch` so collaborators can get one machine-readable JSON file with counts, fields, `other_tags` coverage, derived theme counts, and sample records for the Luxembourg extract. This is intended as the first reusable metadata/reporting layer for Daniel and future sessions.
 
 ---
 

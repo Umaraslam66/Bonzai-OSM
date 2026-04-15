@@ -27,7 +27,9 @@ World-scale OpenStreetMap ingestion and preprocessing for a generative "map LLM"
 - [docs/LUXEMBOURG_FORMAT_BENCHMARK.md](./docs/LUXEMBOURG_FORMAT_BENCHMARK.md): benchmark plan for comparing full Luxembourg exports across formats
 - [scripts/leonardo_cleanup.sh](./scripts/leonardo_cleanup.sh): safe cleanup helper
 - [scripts/leonardo_download_planet.sh](./scripts/leonardo_download_planet.sh): datamover-based planet download helper
+- [scripts/osm_layer_summary.py](./scripts/osm_layer_summary.py): generate one JSON file with counts, properties, tag coverage, and sample features
 - [jobs/luxembourg_probe.sbatch](./jobs/luxembourg_probe.sbatch): free `lrd_all_serial` GDAL probe job
+- [jobs/luxembourg_summary_json.sbatch](./jobs/luxembourg_summary_json.sbatch): generate a Leonardo JSON summary of the Luxembourg extract
 - [jobs/luxembourg_full_geojson.sbatch](./jobs/luxembourg_full_geojson.sbatch): full Luxembourg export to per-layer GeoJSON
 - [jobs/luxembourg_full_gpkg.sbatch](./jobs/luxembourg_full_gpkg.sbatch): full Luxembourg export to multi-layer GeoPackage
 - [jobs/luxembourg_full_parquet.sbatch](./jobs/luxembourg_full_parquet.sbatch): full Luxembourg export to per-layer Parquet/GeoParquet
