@@ -53,6 +53,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from shapely import wkb as shp_wkb
 from shapely.geometry import LineString, MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
 
@@ -62,9 +63,10 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("h3 >=4 is required (pip install 'h3>=4,<5')") from exc
 
 try:
-    from pyrosm import OSM
+    import osmium
+    import osmium.geom
 except ImportError as exc:  # pragma: no cover
-    raise SystemExit("pyrosm is required (pip install pyrosm)") from exc
+    raise SystemExit("pyosmium is required (pip install 'osmium>=3.7,<4')") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -340,39 +342,74 @@ def tokenize_row(
 # ---------------------------------------------------------------------------
 
 
+class _OSMCollector(osmium.SimpleHandler):
+    """pyosmium handler that accumulates highway LineStrings and
+    building MultiPolygons with their tag values.
+
+    We keep tag values as plain strings and geometries as shapely
+    objects (converted from pyosmium's WKB output).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._wkbf = osmium.geom.WKBFactory()
+        self.buildings: List[Tuple[BaseGeometry, str]] = []
+        self.roads: List[Tuple[BaseGeometry, str]] = []
+        self._n_way_fail = 0
+        self._n_area_fail = 0
+
+    def way(self, w) -> None:  # pyosmium callback
+        hw = w.tags.get("highway")
+        if hw is None:
+            return
+        try:
+            wkb_hex = self._wkbf.create_linestring(w)
+        except Exception:
+            # Incomplete node refs, self-intersecting geometry, etc.
+            self._n_way_fail += 1
+            return
+        geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
+        self.roads.append((geom, hw))
+
+    def area(self, a) -> None:  # pyosmium callback
+        # The area handler fires for both closed-way and relation-built
+        # multipolygons. We filter to building=* here.
+        b = a.tags.get("building")
+        if b is None:
+            return
+        try:
+            wkb_hex = self._wkbf.create_multipolygon(a)
+        except Exception:
+            self._n_area_fail += 1
+            return
+        geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
+        self.buildings.append((geom, b))
+
+
 def load_pbf(pbf_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Parse the PBF with pyrosm and return (buildings_df, roads_df).
+    """Parse the PBF with pyosmium and return (buildings_df, roads_df).
 
     Both dataframes are plain pandas with a `geometry` column (shapely)
     plus a string tag column (`building` or `highway`).
+
+    pyosmium's SimpleHandler streams the file once: node locations are
+    cached in a memory-mapped index, ways are reconstructed on the fly,
+    and multipolygon areas are assembled from ways/relations before the
+    `area()` callback fires. This keeps peak memory low even for
+    country-scale extracts.
     """
-    logger.info("loading PBF via pyrosm: %s", pbf_path)
-    osm = OSM(pbf_path)
+    logger.info("loading PBF via pyosmium: %s", pbf_path)
+    handler = _OSMCollector()
+    handler.apply_file(pbf_path, locations=True, idx="flex_mem")
 
-    logger.info("extracting buildings")
-    buildings = osm.get_buildings()
-    if buildings is None or buildings.empty:
-        logger.warning("no buildings returned by pyrosm")
-        buildings = pd.DataFrame(columns=["geometry", "building"])
-    else:
-        # Keep only what we need.
-        cols = ["geometry"] + (["building"] if "building" in buildings.columns else [])
-        buildings = buildings[cols].copy()
-        if "building" not in buildings.columns:
-            buildings["building"] = "yes"
+    buildings = pd.DataFrame(handler.buildings, columns=["geometry", "building"])
+    roads = pd.DataFrame(handler.roads, columns=["geometry", "highway"])
 
-    logger.info("extracting roads (all highway=*)")
-    roads = osm.get_network(network_type="all")
-    if roads is None or roads.empty:
-        logger.warning("no roads returned by pyrosm")
-        roads = pd.DataFrame(columns=["geometry", "highway"])
-    else:
-        cols = ["geometry"] + (["highway"] if "highway" in roads.columns else [])
-        roads = roads[cols].copy()
-        if "highway" not in roads.columns:
-            roads["highway"] = "unclassified"
-
-    logger.info("loaded: %d buildings, %d road segments", len(buildings), len(roads))
+    logger.info(
+        "loaded: %d buildings, %d road segments (skipped %d ways, %d areas)",
+        len(buildings), len(roads),
+        handler._n_way_fail, handler._n_area_fail,
+    )
     return buildings, roads
 
 

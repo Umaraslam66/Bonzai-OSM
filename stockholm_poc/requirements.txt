@@ -1,6 +1,6 @@
 # Stockholm PoC tokenization pipeline dependencies.
 # Tested against Python 3.11 on Leonardo.
-pyrosm==0.6.2
+osmium>=3.7,<4
 shapely>=2.0,<3
 h3>=4.0,<5
 pyarrow>=15,<19
