@@ -7,18 +7,24 @@ Stockholm PoC — convert a BBBike `.osm.pbf` extract into a 1D stream of
 
 Pipeline
 --------
-1. Parse PBF with `pyrosm`; keep only `building=*` (polygons) and
+1. Parse PBF with `pyosmium`; keep only `building=*` (polygons) and
    `highway=*` (lines).
 2. Simplify polylines/polygons with Ramer-Douglas-Peucker
    (`shapely.simplify`, preserve_topology=False).
-3. For every surviving geometry:
-      anchor  = H3 index (res 11) of the first vertex
+3. Compute the chunk bounding box from all surviving geometries, then
+   for every geometry:
+      anchor  = (ix, iy) on a chunk-local GRID_SIZE x GRID_SIZE grid,
+                encoded as two tokens `<X_ix>` and `<Y_iy>`. This keeps
+                the anchor vocabulary at exactly 2*GRID_SIZE tokens no
+                matter how large the chunk gets, which is the key
+                property we need when scaling from Stockholm to the
+                planet in localised chunks.
       moves   = sequence of (direction_bucket, distance_bucket_m) tokens
                 between consecutive simplified vertices, projected to
                 local meters via an equirectangular approximation.
-4. Assign a Morton (Z-order) key to the centroid of every object, sort
-   globally, flatten the sorted objects to one big list of string
-   tokens.
+4. Assign a Morton (Z-order) key to the centroid of every object using
+   the *same* bounding box as the anchor grid, sort globally, flatten
+   the sorted objects to one big list of string tokens.
 5. Write Apache Parquet, chunked, ready for `datasets` streaming.
 
 The token alphabet is deliberately simple and self-describing so the
@@ -53,14 +59,11 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from collections import Counter
+
 from shapely import wkb as shp_wkb
 from shapely.geometry import LineString, MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
-
-try:
-    import h3
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit("h3 >=4 is required (pip install 'h3>=4,<5')") from exc
 
 try:
     import osmium
@@ -73,7 +76,11 @@ except ImportError as exc:  # pragma: no cover
 # Configuration
 # ---------------------------------------------------------------------------
 
-H3_RESOLUTION = 11
+# Local anchor grid: each chunk's bounding box is quantised into a
+# GRID_SIZE x GRID_SIZE grid, and an object's first-vertex cell becomes
+# two tokens `<X_ix>` and `<Y_iy>`. This caps the anchor vocabulary at
+# exactly 2*GRID_SIZE tokens regardless of chunk size or resolution.
+GRID_SIZE = 256
 
 # Simplification tolerance in *degrees*. At Stockholm (~59 N) one degree
 # of latitude is ~111 km; 1e-5 deg ≈ 1.1 m which is a good balance
@@ -268,15 +275,39 @@ class TokenizedObject:
     centroid_lat: float
 
 
-def tokenize_ring(coords: Sequence[Tuple[float, float]]) -> Tuple[str, List[str]]:
-    """Turn a list of (lon, lat) vertices into an anchor H3 token plus
-    a sequence of MOVE tokens. Returns (h3_token, move_tokens).
+def anchor_tokens(
+    lon: float,
+    lat: float,
+    bounds: Tuple[float, float, float, float],
+) -> List[str]:
+    """Map an absolute (lon, lat) onto the chunk-local anchor grid and
+    return the two-token form `[<X_ix>, <Y_iy>]`.
+
+    The grid has GRID_SIZE cells per axis. Coordinates outside the
+    bounding box are clamped (should not happen on well-formed input,
+    but defensive clamping avoids out-of-vocab tokens).
+    """
+    min_lon, min_lat, max_lon, max_lat = bounds
+    nx = (lon - min_lon) / max(max_lon - min_lon, 1e-12)
+    ny = (lat - min_lat) / max(max_lat - min_lat, 1e-12)
+    ix = max(0, min(GRID_SIZE - 1, int(nx * GRID_SIZE)))
+    iy = max(0, min(GRID_SIZE - 1, int(ny * GRID_SIZE)))
+    return [f"<X_{ix}>", f"<Y_{iy}>"]
+
+
+def tokenize_ring(
+    coords: Sequence[Tuple[float, float]],
+) -> Tuple[Tuple[float, float], List[str]]:
+    """Turn a list of (lon, lat) vertices into an (anchor_lonlat,
+    move_tokens) pair. The anchor is returned as raw lon/lat so the
+    caller can convert it to `<X_*> <Y_*>` tokens against the chunk-
+    level bounding box.
 
     Consecutive duplicate vertices are dropped. If after dedup the ring
-    has fewer than 2 points, returns an anchor with no moves.
+    has fewer than 2 points, returns the anchor with no moves.
     """
     if not coords:
-        return ("<H3_INVALID>", [])
+        return ((0.0, 0.0), [])
 
     # Dedup consecutive identical vertices (shapely simplify can leave them).
     dedup: List[Tuple[float, float]] = [coords[0]]
@@ -285,8 +316,6 @@ def tokenize_ring(coords: Sequence[Tuple[float, float]]) -> Tuple[str, List[str]
             dedup.append(pt)
 
     lon0, lat0 = dedup[0]
-    anchor = h3.latlng_to_cell(lat0, lon0, H3_RESOLUTION)
-    h3_token = f"<H3_{anchor}>"
 
     move_tokens: List[str] = []
     prev_lon, prev_lat = lon0, lat0
@@ -303,27 +332,32 @@ def tokenize_ring(coords: Sequence[Tuple[float, float]]) -> Tuple[str, List[str]
             move_tokens.append(f"<MOVE_{bearing}_{bucket}M>")
         prev_lon, prev_lat = lon, lat
 
-    return h3_token, move_tokens
+    return ((lon0, lat0), move_tokens)
 
 
 def tokenize_row(
     geom: BaseGeometry,
     kind: str,
     tag_token: str,
+    bounds: Tuple[float, float, float, float],
 ) -> Optional[TokenizedObject]:
-    """Produce a TokenizedObject for one geometry, or None if empty."""
+    """Produce a TokenizedObject for one geometry, or None if empty.
+
+    `bounds` is the chunk-level (min_lon, min_lat, max_lon, max_lat)
+    used to quantise the anchor onto the 256x256 grid.
+    """
     rings = list(_iter_rings(geom))
     if not rings:
         return None
 
     tokens: List[str] = [f"<{kind}_START>", tag_token]
     for i, ring in enumerate(rings):
-        h3_tok, moves = tokenize_ring(ring)
+        (lon0, lat0), moves = tokenize_ring(ring)
         if i > 0:
             # MultiPolygon part boundary — emit a separator so the model
             # can learn "new ring starts here".
             tokens.append("<PART_SEP>")
-        tokens.append(h3_tok)
+        tokens.extend(anchor_tokens(lon0, lat0, bounds))
         tokens.extend(moves)
     tokens.append(f"<{kind}_END>")
 
@@ -413,54 +447,99 @@ def load_pbf(pbf_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return buildings, roads
 
 
-def simplify_and_tokenize(
+@dataclass
+class _RawObject:
+    """A simplified geometry plus its kind/tag, pre-tokenization."""
+    geom: BaseGeometry
+    kind: str        # "BUILDING" or "ROAD"
+    tag_token: str   # e.g. "<TAG_RESIDENTIAL>"
+
+
+def simplify_geometries(
     buildings: pd.DataFrame,
     roads: pd.DataFrame,
-) -> List[TokenizedObject]:
-    """Simplify every geometry and tokenize it. Returns the flat
-    pre-sort list of TokenizedObject.
+) -> List[_RawObject]:
+    """Apply Ramer-Douglas-Peucker simplification and tag bucketing.
+    Tokenization is deferred until the chunk bounding box is known.
     """
-    out: List[TokenizedObject] = []
+    out: List[_RawObject] = []
 
-    logger.info("simplifying + tokenizing %d buildings", len(buildings))
+    logger.info("simplifying %d buildings", len(buildings))
     for geom, tag in zip(buildings["geometry"], buildings["building"]):
         if geom is None or geom.is_empty:
             continue
         geom = geom.simplify(SIMPLIFY_TOLERANCE_DEG, preserve_topology=False)
+        if geom.is_empty:
+            continue
         tag_token = f"<TAG_{_bucket_building(tag if isinstance(tag, str) else None)}>"
-        obj = tokenize_row(geom, kind="BUILDING", tag_token=tag_token)
-        if obj is not None:
-            out.append(obj)
+        out.append(_RawObject(geom=geom, kind="BUILDING", tag_token=tag_token))
 
-    logger.info("simplifying + tokenizing %d road segments", len(roads))
+    logger.info("simplifying %d road segments", len(roads))
     for geom, tag in zip(roads["geometry"], roads["highway"]):
         if geom is None or geom.is_empty:
             continue
         geom = geom.simplify(SIMPLIFY_TOLERANCE_DEG, preserve_topology=False)
+        if geom.is_empty:
+            continue
         tag_token = f"<TAG_{_bucket_highway(tag if isinstance(tag, str) else None)}>"
-        obj = tokenize_row(geom, kind="ROAD", tag_token=tag_token)
+        out.append(_RawObject(geom=geom, kind="ROAD", tag_token=tag_token))
+
+    logger.info("simplified objects: %d", len(out))
+    return out
+
+
+def compute_bounds(
+    raws: Sequence[_RawObject],
+) -> Tuple[float, float, float, float]:
+    """Aggregate each geometry's bounding box into one chunk-level
+    (min_lon, min_lat, max_lon, max_lat). Stable whether roads or
+    buildings dominate, unlike centroid-only bounds.
+    """
+    if not raws:
+        raise ValueError("no geometries to bound")
+    min_lon = min_lat = math.inf
+    max_lon = max_lat = -math.inf
+    for r in raws:
+        mnx, mny, mxx, mxy = r.geom.bounds
+        if mnx < min_lon:
+            min_lon = mnx
+        if mny < min_lat:
+            min_lat = mny
+        if mxx > max_lon:
+            max_lon = mxx
+        if mxy > max_lat:
+            max_lat = mxy
+    bounds = (min_lon, min_lat, max_lon, max_lat)
+    logger.info(
+        "chunk bbox: lon [%.5f, %.5f], lat [%.5f, %.5f]",
+        bounds[0], bounds[2], bounds[1], bounds[3],
+    )
+    return bounds
+
+
+def tokenize_objects(
+    raws: Sequence[_RawObject],
+    bounds: Tuple[float, float, float, float],
+) -> List[TokenizedObject]:
+    """Tokenize simplified geometries against the chunk bounding box."""
+    out: List[TokenizedObject] = []
+    for r in raws:
+        obj = tokenize_row(r.geom, kind=r.kind, tag_token=r.tag_token, bounds=bounds)
         if obj is not None:
             out.append(obj)
-
     logger.info("total tokenized objects: %d", len(out))
     return out
 
 
-def sort_objects_zorder(objects: List[TokenizedObject]) -> List[TokenizedObject]:
-    """Sort objects by the Morton (Z-order) key of their centroid.
-
-    The bounding box is computed from the data itself so the ordering
-    is adaptive to whatever region we process.
+def sort_objects_zorder(
+    objects: List[TokenizedObject],
+    bounds: Tuple[float, float, float, float],
+) -> List[TokenizedObject]:
+    """Sort objects by the Morton (Z-order) key of their centroid,
+    reusing the same chunk bounding box we used for anchor quantisation.
     """
     if not objects:
         return objects
-    lons = np.fromiter((o.centroid_lon for o in objects), dtype=np.float64)
-    lats = np.fromiter((o.centroid_lat for o in objects), dtype=np.float64)
-    bounds = (lons.min(), lats.min(), lons.max(), lats.max())
-    logger.info(
-        "z-order bbox: lon [%.5f, %.5f], lat [%.5f, %.5f]",
-        bounds[0], bounds[2], bounds[1], bounds[3],
-    )
     keyed = [(morton_key(o.centroid_lon, o.centroid_lat, bounds), o) for o in objects]
     keyed.sort(key=lambda kv: kv[0])
     return [o for _, o in keyed]
@@ -537,8 +616,15 @@ def write_parquet(
 # ---------------------------------------------------------------------------
 
 
+def _family_of(token: str) -> str:
+    """Return the token family name, e.g. `<X_142>` -> `X`."""
+    body = token.lstrip("<").rstrip(">")
+    return body.split("_", 1)[0] if "_" in body else body
+
+
 def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> None:
-    """Write a sorted, deduplicated vocabulary JSON from the corpus.
+    """Write a sorted, deduplicated vocabulary JSON from the corpus and
+    log a family-level audit.
 
     This is NOT a trained tokenizer — it's the raw set of string tokens
     produced by the pipeline. HuggingFace tokenizers can be built from
@@ -554,6 +640,11 @@ def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> None:
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     logger.info("vocab dumped: %d unique tokens -> %s", len(vocab), out_path)
+
+    families = Counter(_family_of(t) for t in vocab)
+    logger.info("vocab audit (unique tokens per family):")
+    for family, count in families.most_common():
+        logger.info("  %-10s %d", family, count)
 
 
 # ---------------------------------------------------------------------------
@@ -612,11 +703,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Stage 1: parse
     buildings, roads = load_pbf(args.input)
 
-    # Stage 2+3+4 (simplify/H3/moves)
-    objects = simplify_and_tokenize(buildings, roads)
+    # Stage 2: simplify geometries (tokenization deferred — we need the
+    # chunk bounding box first so the anchor grid is well-defined).
+    raws = simplify_geometries(buildings, roads)
+    if not raws:
+        logger.error("no geometries survived simplification; aborting")
+        return 3
 
-    # Stage 5: global Z-order sort
-    objects = sort_objects_zorder(objects)
+    # Stage 3: compute the chunk bounding box used for both the anchor
+    # grid and the Z-order sort.
+    bounds = compute_bounds(raws)
+
+    # Stage 4: tokenize with local anchor grid + relative moves.
+    objects = tokenize_objects(raws, bounds)
+
+    # Stage 5: global Z-order sort using the same bounding box.
+    objects = sort_objects_zorder(objects, bounds)
 
     # Stage 6: persist
     parquet_path = os.path.join(args.output_dir, args.output_name)

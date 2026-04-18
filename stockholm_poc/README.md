@@ -25,14 +25,17 @@ big sequence obtained by concatenating objects in **Z-order (Morton)**
 of their centroids so the 2D map becomes a 1D stream with locality.
 
 ```
-<BUILDING_START>   <TAG_{class}>   <H3_{res11-cell}>   <MOVE_{DIR}_{Nm}M> ...   <BUILDING_END>
-<ROAD_START>       <TAG_{class}>   <H3_{res11-cell}>   <MOVE_{DIR}_{Nm}M> ...   <ROAD_END>
+<BUILDING_START>   <TAG_{class}>   <X_{0..255}> <Y_{0..255}>   <MOVE_{DIR}_{Nm}M> ...   <BUILDING_END>
+<ROAD_START>       <TAG_{class}>   <X_{0..255}> <Y_{0..255}>   <MOVE_{DIR}_{Nm}M> ...   <ROAD_END>
 <PART_SEP>         # separator between rings of a MultiPolygon
 ```
 
-- **Anchor** — the first vertex of each (multi)polygon / line is turned
-  into an **H3 index at resolution 11** (~25 m edge). This gives the
-  model an absolute spatial "you are here" before any relative motion.
+- **Anchor** — the first vertex of each (multi)polygon / line is
+  quantised onto a **256x256 grid** spanning the current chunk's
+  bounding box and emitted as two tokens `<X_ix>` `<Y_iy>`. Anchor
+  vocabulary is capped at exactly **512 tokens** per chunk, independent
+  of chunk size — the key property we need when scaling from Stockholm
+  to planet-sized chunks.
 - **Moves** — every subsequent simplified vertex is expressed as a
   direction + distance delta from the previous vertex, in local meters
   via an equirectangular projection:
