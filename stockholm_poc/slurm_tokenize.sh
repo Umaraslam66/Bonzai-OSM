@@ -66,7 +66,7 @@ fi
 # are CPython 3.8 – 3.11 only, so 3.11 is the current sweet spot.
 module purge || true
 if module avail 2>&1 | grep -qE 'python/3\.11'; then
-  module load "$(module avail 2>&1 | grep -oE 'python/3\.11[^ ]*' | head -n1)"
+  module load "$(module avail 2>&1 | grep -oE 'python/3\.11[^ (]*' | head -n1)"
 fi
 
 # shellcheck disable=SC1091
