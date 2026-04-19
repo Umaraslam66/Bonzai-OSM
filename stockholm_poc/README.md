@@ -25,9 +25,13 @@ big sequence obtained by concatenating objects in **Z-order (Morton)**
 of their centroids so the 2D map becomes a 1D stream with locality.
 
 ```
-<BUILDING_START>   <TAG_{class}>   <X_{0..255}> <Y_{0..255}>   <MOVE_{DIR}_{Nm}M> ...   <BUILDING_END>
-<ROAD_START>       <TAG_{class}>   <X_{0..255}> <Y_{0..255}>   <MOVE_{DIR}_{Nm}M> ...   <ROAD_END>
-<PART_SEP>         # separator between rings of a MultiPolygon
+<BUILDING_START>  <TAG_{class}>   [<LEVELS_*>]                 <X_*><Y_*>   <MOVE_*> ...   <BUILDING_END>
+<ROAD_START>      <TAG_{class}>   [<SPEED_*>] [<SURFACE_*>]    <X_*><Y_*>   <MOVE_*> ...   <ROAD_END>
+<POI_START>       <TAG_{cat}>                                  <X_*><Y_*>                  <POI_END>
+<LANDUSE_START>   <TAG_{cat}>                                  <X_*><Y_*>   <MOVE_*> ...   <LANDUSE_END>
+<WATERWAY_START>  <TAG_{class}>                                <X_*><Y_*>   <MOVE_*> ...   <WATERWAY_END>
+<RAILWAY_START>   <TAG_{class}>                                <X_*><Y_*>   <MOVE_*> ...   <RAILWAY_END>
+<PART_SEP>        # separator between rings of a MultiPolygon
 ```
 
 - **Anchor** — the first vertex of each (multi)polygon / line is

@@ -7,41 +7,55 @@ Stockholm PoC — convert a BBBike `.osm.pbf` extract into a 1D stream of
 
 Pipeline
 --------
-1. Parse PBF with `pyosmium`; keep only `building=*` (polygons) and
-   `highway=*` (lines).
+1. Parse PBF with `pyosmium`. Keep:
+     * `building=*`    (multipolygons)  with optional `building:levels`
+     * `highway=*`     (lines)          with optional `maxspeed`, `surface`
+     * `amenity=*` / `shop=*`    on nodes     -> POI points
+     * `waterway=*`    (lines)
+     * `railway=*`     (lines)
+     * `landuse=*` and `natural=water` (multipolygons) -> LANDUSE
 2. Simplify polylines/polygons with Ramer-Douglas-Peucker
    (`shapely.simplify`, preserve_topology=False).
 3. Compute the chunk bounding box from all surviving geometries, then
    for every geometry:
       anchor  = (ix, iy) on a chunk-local GRID_SIZE x GRID_SIZE grid,
-                encoded as two tokens `<X_ix>` and `<Y_iy>`. This keeps
-                the anchor vocabulary at exactly 2*GRID_SIZE tokens no
-                matter how large the chunk gets, which is the key
-                property we need when scaling from Stockholm to the
-                planet in localised chunks.
+                encoded as two tokens `<X_ix>` and `<Y_iy>`.
       moves   = sequence of (direction_bucket, distance_bucket_m) tokens
                 between consecutive simplified vertices, projected to
                 local meters via an equirectangular approximation.
-4. Assign a Morton (Z-order) key to the centroid of every object using
-   the *same* bounding box as the anchor grid, sort globally, flatten
-   the sorted objects to one big list of string tokens.
+      extras  = optional attribute tokens injected between the class tag
+                and the anchor — LEVELS (buildings), SPEED+SURFACE (roads).
+      POIs    = (X, Y) anchor only; no moves, no extras.
+4. Assign a Hilbert-curve key to the centroid of every object using the
+   *same* bounding box as the anchor grid, sort globally, flatten the
+   sorted objects to one big list of string tokens.
 5. Write Apache Parquet, chunked, ready for `datasets` streaming.
+6. Print a vocabulary audit and the final total vocab size.
 
-The token alphabet is deliberately simple and self-describing so the
-vocabulary file is reproducible from the Parquet output.
+"Semantic compression" bucketing
+--------------------------------
+All free-form tag values are mapped onto small, fixed vocabularies
+before token generation so global vocabulary stays bounded:
+  * POIs     : ~20 categories across amenity + shop values
+  * Landuse  : 9 categories (park, water, residential, …)
+  * Waterway : 5 (river, stream, canal, drain, other)
+  * Railway  : 5 (rail, tram, subway, narrow_gauge, other)
+  * Levels   : 4 buckets (1-2, 3-5, 6-10, 11+)
+  * Speed    : 3 buckets (low <40, mid 40-70, high >70 kph)
+  * Surface  : 2 buckets (paved, unpaved)
 
 Design notes
 ------------
-- We intentionally avoid geopandas for portability — pyrosm returns
-  plain GeoDataFrames but we only need geometry + a couple of string
-  fields, so we fall back to pure shapely where it keeps things simple.
+- We intentionally avoid geopandas for portability. Geometries come out
+  of pyosmium as WKB hex; we hydrate them with shapely directly.
 - Long edges are split across multiple MOVE tokens: we snap the distance
-  to the nearest bucket in a log-ish ladder and emit N copies of the
-  max-bucket token for anything that overshoots. This bounds the per-
-  token distance so the model sees a stable unit of motion.
-- The Morton key uses a 21-bit-per-axis interleave (good to ~1 m
-  resolution at Stockholm latitudes), which is overkill but makes the
-  ordering deterministic and fully reversible for debugging.
+  to the largest-fitting bucket in a log-ish ladder and emit N tokens
+  for anything that overshoots. This bounds the per-token distance so
+  the model sees a stable unit of motion.
+- The Hilbert key uses a 21-bit-per-axis encoding (~1 m resolution at
+  Stockholm latitudes). Hilbert preserves 2D locality better than the
+  older Z-order key — adjacent Hilbert positions are always spatial
+  neighbours, which is what we want for the autoregressive stream.
 """
 
 from __future__ import annotations
@@ -51,18 +65,18 @@ import json
 import logging
 import math
 import os
+import re
 import sys
-from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from collections import Counter
-
 from shapely import wkb as shp_wkb
-from shapely.geometry import LineString, MultiPolygon, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
 try:
@@ -76,20 +90,10 @@ except ImportError as exc:  # pragma: no cover
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Local anchor grid: each chunk's bounding box is quantised into a
-# GRID_SIZE x GRID_SIZE grid, and an object's first-vertex cell becomes
-# two tokens `<X_ix>` and `<Y_iy>`. This caps the anchor vocabulary at
-# exactly 2*GRID_SIZE tokens regardless of chunk size or resolution.
 GRID_SIZE = 256
 
-# Simplification tolerance in *degrees*. At Stockholm (~59 N) one degree
-# of latitude is ~111 km; 1e-5 deg ≈ 1.1 m which is a good balance
-# between corner preservation and token bloat.
 SIMPLIFY_TOLERANCE_DEG = 1e-5
 
-# 8-way compass. Bearings are CCW from east by convention in math, but
-# the user-facing token reads more naturally as compass bearings, so we
-# map (dx, dy) -> compass where N=+dy, E=+dx.
 COMPASS_BUCKETS = [
     (0.0, "E"),
     (45.0, "NE"),
@@ -101,15 +105,17 @@ COMPASS_BUCKETS = [
     (-45.0, "SE"),
 ]
 
-# Log-ish distance ladder in meters. An edge of length D is expressed as
-# a greedy decomposition over this ladder (largest-first), which caps
-# the maximum move distance the model has to generate and keeps the
-# token vocabulary small. Last bucket doubles as a "long segment"
-# primitive (repeated as needed).
 DISTANCE_BUCKETS_M = [1000, 500, 250, 100, 50, 25, 15, 10, 5]
 
-# Highway / building tag classes we keep. Everything else is rolled up
-# into OTHER so the vocab stays bounded.
+CHUNK_SIZE = 10_000
+
+logger = logging.getLogger("tokenize_stockholm")
+
+
+# ---------------------------------------------------------------------------
+# Tag / attribute bucketing
+# ---------------------------------------------------------------------------
+
 HIGHWAY_CLASSES = {
     "motorway", "trunk", "primary", "secondary", "tertiary",
     "unclassified", "residential", "service", "living_street",
@@ -122,128 +128,127 @@ BUILDING_CLASSES = {
     "public", "civic",
 }
 
-# Parquet chunk size (rows = objects). Small enough to stream friendly,
-# big enough that row-group overhead stays negligible.
-CHUNK_SIZE = 10_000
+# POI categories — ~20 broad buckets over amenity=* / shop=* values.
+# Every unknown amenity falls through to OTHER_AMENITY; every unknown
+# shop falls through to RETAIL (since shop=* is already retail by
+# definition). `name=*` is explicitly *not* read.
+AMENITY_TO_CATEGORY: Dict[str, str] = {
+    # FOOD_BEVERAGE
+    "cafe": "FOOD_BEVERAGE", "restaurant": "FOOD_BEVERAGE",
+    "fast_food": "FOOD_BEVERAGE", "bar": "FOOD_BEVERAGE",
+    "pub": "FOOD_BEVERAGE", "ice_cream": "FOOD_BEVERAGE",
+    "biergarten": "FOOD_BEVERAGE", "food_court": "FOOD_BEVERAGE",
+    # EDUCATION
+    "school": "EDUCATION", "kindergarten": "EDUCATION",
+    "university": "EDUCATION", "college": "EDUCATION",
+    "library": "EDUCATION", "language_school": "EDUCATION",
+    "music_school": "EDUCATION", "driving_school": "EDUCATION",
+    # HEALTHCARE
+    "hospital": "HEALTHCARE", "clinic": "HEALTHCARE",
+    "pharmacy": "HEALTHCARE", "doctors": "HEALTHCARE",
+    "dentist": "HEALTHCARE", "veterinary": "HEALTHCARE",
+    # FINANCIAL
+    "bank": "FINANCIAL", "atm": "FINANCIAL", "bureau_de_change": "FINANCIAL",
+    # CIVIC
+    "townhall": "CIVIC", "courthouse": "CIVIC", "post_office": "CIVIC",
+    "embassy": "CIVIC", "public_building": "CIVIC",
+    # SAFETY
+    "police": "SAFETY", "fire_station": "SAFETY", "prison": "SAFETY",
+    # ENTERTAINMENT
+    "cinema": "ENTERTAINMENT", "theatre": "ENTERTAINMENT",
+    "nightclub": "ENTERTAINMENT", "arts_centre": "ENTERTAINMENT",
+    "casino": "ENTERTAINMENT", "community_centre": "ENTERTAINMENT",
+    "events_venue": "ENTERTAINMENT",
+    # WORSHIP
+    "place_of_worship": "WORSHIP", "grave_yard": "WORSHIP",
+    # ACCOMMODATION (amenity-side; tourism=hotel lives under tourism=*)
+    "hotel": "ACCOMMODATION", "hostel": "ACCOMMODATION",
+    "guest_house": "ACCOMMODATION", "motel": "ACCOMMODATION",
+    # TRANSPORT (non-parking)
+    "bus_station": "TRANSPORT", "taxi": "TRANSPORT",
+    "ferry_terminal": "TRANSPORT", "bicycle_rental": "TRANSPORT",
+    # PARKING
+    "parking": "PARKING", "bicycle_parking": "PARKING",
+    "motorcycle_parking": "PARKING", "parking_entrance": "PARKING",
+    "parking_space": "PARKING",
+    # FUEL
+    "fuel": "FUEL", "charging_station": "FUEL",
+    # AUTOMOTIVE
+    "car_rental": "AUTOMOTIVE", "car_wash": "AUTOMOTIVE",
+    "car_sharing": "AUTOMOTIVE",
+    # PUBLIC_AMENITY (benches, bins, info, etc. — low-signal but common)
+    "bench": "PUBLIC_AMENITY", "drinking_water": "PUBLIC_AMENITY",
+    "toilets": "PUBLIC_AMENITY", "waste_basket": "PUBLIC_AMENITY",
+    "waste_disposal": "PUBLIC_AMENITY", "recycling": "PUBLIC_AMENITY",
+    "shelter": "PUBLIC_AMENITY", "post_box": "PUBLIC_AMENITY",
+    "telephone": "PUBLIC_AMENITY", "clock": "PUBLIC_AMENITY",
+    "bbq": "PUBLIC_AMENITY", "fountain": "PUBLIC_AMENITY",
+    "hunting_stand": "PUBLIC_AMENITY", "vending_machine": "PUBLIC_AMENITY",
+    # RECREATION
+    "playground": "RECREATION", "swimming_pool": "RECREATION",
+    "sports_centre": "RECREATION", "fitness_centre": "RECREATION",
+    "gym": "RECREATION",
+}
 
-logger = logging.getLogger("tokenize_stockholm")
+# Shop values: almost everything is retail, but food-adjacent shops get
+# their own RETAIL_GROCERY bucket so the model can distinguish daily-
+# errand land-use patterns.
+SHOP_TO_CATEGORY: Dict[str, str] = {
+    "supermarket": "RETAIL_GROCERY", "convenience": "RETAIL_GROCERY",
+    "bakery": "RETAIL_GROCERY", "butcher": "RETAIL_GROCERY",
+    "greengrocer": "RETAIL_GROCERY", "alcohol": "RETAIL_GROCERY",
+    "wine": "RETAIL_GROCERY", "seafood": "RETAIL_GROCERY",
+    "cheese": "RETAIL_GROCERY", "deli": "RETAIL_GROCERY",
+    "farm": "RETAIL_GROCERY",
+}
 
+# Landuse + natural=water classes.
+LANDUSE_TO_CATEGORY: Dict[str, str] = {
+    "park": "PARK", "grass": "PARK", "meadow": "PARK",
+    "forest": "PARK", "orchard": "PARK", "recreation_ground": "PARK",
+    "cemetery": "PARK", "village_green": "PARK", "allotments": "PARK",
+    "garden": "PARK",
+    "residential": "RESIDENTIAL",
+    "commercial": "COMMERCIAL", "retail": "COMMERCIAL",
+    "industrial": "INDUSTRIAL", "quarry": "INDUSTRIAL",
+    "landfill": "INDUSTRIAL",
+    "farmland": "FARMLAND", "farmyard": "FARMLAND", "vineyard": "FARMLAND",
+    "construction": "CONSTRUCTION", "brownfield": "CONSTRUCTION",
+    "greenfield": "CONSTRUCTION",
+    "education": "INSTITUTIONAL", "religious": "INSTITUTIONAL",
+    "military": "INSTITUTIONAL",
+    "basin": "WATER", "reservoir": "WATER", "pond": "WATER",
+}
+# We also accept natural=wood/scrub as PARK, and natural=water as WATER.
+NATURAL_TO_CATEGORY: Dict[str, str] = {
+    "water": "WATER", "wood": "PARK", "scrub": "PARK",
+    "wetland": "PARK", "heath": "PARK",
+}
 
-# ---------------------------------------------------------------------------
-# Geometry helpers
-# ---------------------------------------------------------------------------
+WATERWAY_TO_CATEGORY: Dict[str, str] = {
+    "river": "RIVER", "riverbank": "RIVER",
+    "stream": "STREAM", "tidal_channel": "STREAM",
+    "canal": "CANAL",
+    "drain": "DRAIN", "ditch": "DRAIN",
+}
+RAILWAY_TO_CATEGORY: Dict[str, str] = {
+    "rail": "RAIL",
+    "tram": "TRAM",
+    "subway": "SUBWAY", "light_rail": "SUBWAY",
+    "narrow_gauge": "NARROW_GAUGE", "monorail": "NARROW_GAUGE",
+    "funicular": "NARROW_GAUGE",
+}
 
+PAVED_SURFACES = {
+    "paved", "asphalt", "concrete", "concrete:plates", "concrete:lanes",
+    "paving_stones", "sett", "cobblestone", "metal", "wood_planks",
+}
+UNPAVED_SURFACES = {
+    "unpaved", "gravel", "fine_gravel", "pebblestone", "compacted",
+    "dirt", "ground", "sand", "earth", "grass", "mud", "wood",
+}
 
-def _equirectangular_meters(
-    lon_ref: float, lat_ref: float, lon: float, lat: float
-) -> Tuple[float, float]:
-    """Project (lon, lat) to local meters relative to (lon_ref, lat_ref).
-
-    Equirectangular approximation. Fine for per-object offsets, where
-    the span is at most a few hundred meters.
-    Returns (dx, dy) in meters, with +x east and +y north.
-    """
-    # 1 degree latitude ≈ 111_319.49 m; longitude shrinks by cos(lat).
-    lat_rad = math.radians(lat_ref)
-    dx = (lon - lon_ref) * 111_319.49 * math.cos(lat_rad)
-    dy = (lat - lat_ref) * 111_319.49
-    return dx, dy
-
-
-def _bearing_bucket(dx: float, dy: float) -> str:
-    """Snap a (dx, dy) vector to one of the 8 compass buckets."""
-    angle = math.degrees(math.atan2(dy, dx))  # -180..180, 0 = east
-    best = None
-    best_delta = 360.0
-    for center, name in COMPASS_BUCKETS:
-        delta = abs(((angle - center) + 180.0) % 360.0 - 180.0)
-        if delta < best_delta:
-            best_delta = delta
-            best = name
-    assert best is not None
-    return best
-
-
-def _split_distance(meters: float) -> List[int]:
-    """Greedy decomposition of a meter distance onto DISTANCE_BUCKETS_M.
-
-    Edges shorter than the smallest bucket are dropped entirely (they
-    are noise after simplification). Long edges emit multiple tokens.
-    """
-    out: List[int] = []
-    remaining = meters
-    smallest = DISTANCE_BUCKETS_M[-1]
-    while remaining >= smallest:
-        for bucket in DISTANCE_BUCKETS_M:
-            if remaining >= bucket:
-                out.append(bucket)
-                remaining -= bucket
-                break
-        else:  # pragma: no cover — loop invariant
-            break
-    return out
-
-
-def _iter_rings(geom: BaseGeometry) -> Iterator[Sequence[Tuple[float, float]]]:
-    """Yield (lon, lat) coordinate sequences for whatever kind of
-    geometry we were handed. Building polygons become their exterior
-    ring; MultiPolygons yield each part's exterior; LineStrings yield
-    their coords as-is.
-    """
-    if geom is None or geom.is_empty:
-        return
-    if isinstance(geom, LineString):
-        yield list(geom.coords)
-    elif isinstance(geom, Polygon):
-        yield list(geom.exterior.coords)
-    elif isinstance(geom, MultiPolygon):
-        for part in geom.geoms:
-            yield list(part.exterior.coords)
-    else:
-        # GeometryCollection, MultiLineString, etc. — flatten children.
-        geoms = getattr(geom, "geoms", None)
-        if geoms is None:
-            return
-        for child in geoms:
-            yield from _iter_rings(child)
-
-
-# ---------------------------------------------------------------------------
-# Z-order (Morton) encoding for 2D centroid sort
-# ---------------------------------------------------------------------------
-
-
-_MORTON_BITS = 21  # 21 bits per axis -> ~1 m at Stockholm latitudes
-
-
-def _interleave_bits(x: int, y: int, bits: int = _MORTON_BITS) -> int:
-    """Interleave the low `bits` of x and y into one Morton code."""
-    result = 0
-    for i in range(bits):
-        result |= ((x >> i) & 1) << (2 * i)
-        result |= ((y >> i) & 1) << (2 * i + 1)
-    return result
-
-
-def morton_key(lon: float, lat: float, bounds: Tuple[float, float, float, float]) -> int:
-    """Z-order key for a centroid within a lon/lat bounding box.
-
-    `bounds` is (min_lon, min_lat, max_lon, max_lat). The coordinate is
-    normalised to [0, 1], scaled by 2**bits, clamped to integer range,
-    then bit-interleaved.
-    """
-    min_lon, min_lat, max_lon, max_lat = bounds
-    nx = (lon - min_lon) / max(max_lon - min_lon, 1e-12)
-    ny = (lat - min_lat) / max(max_lat - min_lat, 1e-12)
-    scale = (1 << _MORTON_BITS) - 1
-    ix = max(0, min(scale, int(nx * scale)))
-    iy = max(0, min(scale, int(ny * scale)))
-    return _interleave_bits(ix, iy)
-
-
-# ---------------------------------------------------------------------------
-# Tag classification
-# ---------------------------------------------------------------------------
+_INT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 
 def _bucket_highway(tag: Optional[str]) -> str:
@@ -260,17 +265,223 @@ def _bucket_building(tag: Optional[str]) -> str:
     return tag.upper() if tag in BUILDING_CLASSES else "OTHER"
 
 
+def _bucket_poi(amenity: Optional[str], shop: Optional[str]) -> Optional[str]:
+    """Return the POI category token body, or None if neither tag is set."""
+    if amenity:
+        key = amenity.lower()
+        return AMENITY_TO_CATEGORY.get(key, "OTHER_AMENITY")
+    if shop:
+        key = shop.lower()
+        return SHOP_TO_CATEGORY.get(key, "RETAIL")
+    return None
+
+
+def _bucket_landuse(landuse: Optional[str], natural: Optional[str]) -> Optional[str]:
+    if landuse:
+        return LANDUSE_TO_CATEGORY.get(landuse.lower(), "OTHER")
+    if natural:
+        return NATURAL_TO_CATEGORY.get(natural.lower())
+    return None
+
+
+def _bucket_waterway(tag: Optional[str]) -> str:
+    if not tag:
+        return "OTHER"
+    return WATERWAY_TO_CATEGORY.get(tag.lower(), "OTHER")
+
+
+def _bucket_railway(tag: Optional[str]) -> str:
+    if not tag:
+        return "OTHER"
+    return RAILWAY_TO_CATEGORY.get(tag.lower(), "OTHER")
+
+
+def _bucket_levels(raw: Optional[str]) -> Optional[str]:
+    """Bucket building:levels into 4 tokens."""
+    if not raw:
+        return None
+    match = _INT_RE.search(str(raw))
+    if match is None:
+        return None
+    try:
+        n = int(float(match.group(0)))
+    except ValueError:
+        return None
+    if n < 1:
+        return None
+    if n <= 2:
+        return "<LEVELS_1_2>"
+    if n <= 5:
+        return "<LEVELS_3_5>"
+    if n <= 10:
+        return "<LEVELS_6_10>"
+    return "<LEVELS_11_PLUS>"
+
+
+def _bucket_speed(raw: Optional[str]) -> Optional[str]:
+    """Bucket maxspeed into <SPEED_LOW|MID|HIGH>, normalising units."""
+    if not raw:
+        return None
+    raw_str = str(raw).lower()
+    match = _INT_RE.search(raw_str)
+    if match is None:
+        return None
+    try:
+        value = float(match.group(0))
+    except ValueError:
+        return None
+    # Convert mph to kph if the unit is explicit.
+    if "mph" in raw_str:
+        value *= 1.609
+    kph = int(round(value))
+    if kph < 40:
+        return "<SPEED_LOW>"
+    if kph <= 70:
+        return "<SPEED_MID>"
+    return "<SPEED_HIGH>"
+
+
+def _bucket_surface(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    key = str(raw).lower()
+    if key in PAVED_SURFACES:
+        return "<SURFACE_PAVED>"
+    if key in UNPAVED_SURFACES:
+        return "<SURFACE_UNPAVED>"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Geometry helpers
+# ---------------------------------------------------------------------------
+
+
+def _equirectangular_meters(
+    lon_ref: float, lat_ref: float, lon: float, lat: float
+) -> Tuple[float, float]:
+    """Project (lon, lat) to local meters relative to (lon_ref, lat_ref)."""
+    lat_rad = math.radians(lat_ref)
+    dx = (lon - lon_ref) * 111_319.49 * math.cos(lat_rad)
+    dy = (lat - lat_ref) * 111_319.49
+    return dx, dy
+
+
+def _bearing_bucket(dx: float, dy: float) -> str:
+    angle = math.degrees(math.atan2(dy, dx))
+    best = None
+    best_delta = 360.0
+    for center, name in COMPASS_BUCKETS:
+        delta = abs(((angle - center) + 180.0) % 360.0 - 180.0)
+        if delta < best_delta:
+            best_delta = delta
+            best = name
+    assert best is not None
+    return best
+
+
+def _split_distance(meters: float) -> List[int]:
+    out: List[int] = []
+    remaining = meters
+    smallest = DISTANCE_BUCKETS_M[-1]
+    while remaining >= smallest:
+        for bucket in DISTANCE_BUCKETS_M:
+            if remaining >= bucket:
+                out.append(bucket)
+                remaining -= bucket
+                break
+        else:  # pragma: no cover
+            break
+    return out
+
+
+def _iter_rings(geom: BaseGeometry) -> Iterator[Sequence[Tuple[float, float]]]:
+    if geom is None or geom.is_empty:
+        return
+    if isinstance(geom, LineString):
+        yield list(geom.coords)
+    elif isinstance(geom, Polygon):
+        yield list(geom.exterior.coords)
+    elif isinstance(geom, MultiPolygon):
+        for part in geom.geoms:
+            yield list(part.exterior.coords)
+    else:
+        geoms = getattr(geom, "geoms", None)
+        if geoms is None:
+            return
+        for child in geoms:
+            yield from _iter_rings(child)
+
+
+# ---------------------------------------------------------------------------
+# Hilbert curve encoding for 2D centroid sort
+# ---------------------------------------------------------------------------
+
+
+_HILBERT_BITS = 21  # 2^21 -> ~2M cells per axis, ~1 m at Stockholm latitudes
+
+
+def _hilbert_xy_to_d(n: int, x: int, y: int) -> int:
+    """Convert (x, y) integer coordinates to a Hilbert curve distance.
+
+    `n` must be a power of two. Adapted from the standard reference
+    implementation (Skilling 2004 / Wikipedia's Hilbert curve article).
+    Hilbert preserves locality better than Morton/Z-order: adjacent
+    positions along the curve are always spatial neighbours.
+    """
+    d = 0
+    s = n // 2
+    while s > 0:
+        rx = 1 if (x & s) > 0 else 0
+        ry = 1 if (y & s) > 0 else 0
+        d += s * s * ((3 * rx) ^ ry)
+        if ry == 0:
+            if rx == 1:
+                x = s - 1 - x
+                y = s - 1 - y
+            x, y = y, x
+        s //= 2
+    return d
+
+
+def hilbert_key(
+    lon: float,
+    lat: float,
+    bounds: Tuple[float, float, float, float],
+) -> int:
+    min_lon, min_lat, max_lon, max_lat = bounds
+    nx = (lon - min_lon) / max(max_lon - min_lon, 1e-12)
+    ny = (lat - min_lat) / max(max_lat - min_lat, 1e-12)
+    n = 1 << _HILBERT_BITS
+    ix = max(0, min(n - 1, int(nx * n)))
+    iy = max(0, min(n - 1, int(ny * n)))
+    return _hilbert_xy_to_d(n, ix, iy)
+
+
 # ---------------------------------------------------------------------------
 # Core per-object tokenization
 # ---------------------------------------------------------------------------
 
 
 @dataclass
+class _RawObject:
+    """Simplified geometry + classification + attribute tokens.
+
+    `extra_tokens` are injected between the <KIND_START>+<TAG_*> header
+    and the first <X_*><Y_*> anchor — so e.g. a building might read
+    [<BUILDING_START>, <TAG_RESIDENTIAL>, <LEVELS_3_5>, <X_42>, <Y_7>, ...].
+    """
+    geom: BaseGeometry
+    kind: str          # BUILDING | ROAD | POI | LANDUSE | WATERWAY | RAILWAY
+    tag_token: str
+    extra_tokens: List[str] = field(default_factory=list)
+
+
+@dataclass
 class TokenizedObject:
-    """One Stockholm object, ready to be globally sorted and serialized."""
-    kind: str                # "BUILDING" or "ROAD"
-    tag_token: str           # e.g. "<TAG_RESIDENTIAL>"
-    tokens: List[str]        # full per-object token list
+    kind: str
+    tag_token: str
+    tokens: List[str]
     centroid_lon: float
     centroid_lat: float
 
@@ -280,12 +491,8 @@ def anchor_tokens(
     lat: float,
     bounds: Tuple[float, float, float, float],
 ) -> List[str]:
-    """Map an absolute (lon, lat) onto the chunk-local anchor grid and
+    """Map an absolute (lon, lat) onto the chunk-local 256x256 grid and
     return the two-token form `[<X_ix>, <Y_iy>]`.
-
-    The grid has GRID_SIZE cells per axis. Coordinates outside the
-    bounding box are clamped (should not happen on well-formed input,
-    but defensive clamping avoids out-of-vocab tokens).
     """
     min_lon, min_lat, max_lon, max_lat = bounds
     nx = (lon - min_lon) / max(max_lon - min_lon, 1e-12)
@@ -298,18 +505,9 @@ def anchor_tokens(
 def tokenize_ring(
     coords: Sequence[Tuple[float, float]],
 ) -> Tuple[Tuple[float, float], List[str]]:
-    """Turn a list of (lon, lat) vertices into an (anchor_lonlat,
-    move_tokens) pair. The anchor is returned as raw lon/lat so the
-    caller can convert it to `<X_*> <Y_*>` tokens against the chunk-
-    level bounding box.
-
-    Consecutive duplicate vertices are dropped. If after dedup the ring
-    has fewer than 2 points, returns the anchor with no moves.
-    """
     if not coords:
         return ((0.0, 0.0), [])
 
-    # Dedup consecutive identical vertices (shapely simplify can leave them).
     dedup: List[Tuple[float, float]] = [coords[0]]
     for pt in coords[1:]:
         if pt != dedup[-1]:
@@ -323,8 +521,6 @@ def tokenize_ring(
         dx, dy = _equirectangular_meters(prev_lon, prev_lat, lon, lat)
         dist = math.hypot(dx, dy)
         if dist < DISTANCE_BUCKETS_M[-1]:
-            # Below the smallest bucket — skip, but still advance the
-            # "previous" anchor so we don't accumulate drift.
             prev_lon, prev_lat = lon, lat
             continue
         bearing = _bearing_bucket(dx, dy)
@@ -336,35 +532,47 @@ def tokenize_ring(
 
 
 def tokenize_row(
-    geom: BaseGeometry,
-    kind: str,
-    tag_token: str,
+    raw: _RawObject,
     bounds: Tuple[float, float, float, float],
 ) -> Optional[TokenizedObject]:
-    """Produce a TokenizedObject for one geometry, or None if empty.
+    """Produce a TokenizedObject from one _RawObject.
 
-    `bounds` is the chunk-level (min_lon, min_lat, max_lon, max_lat)
-    used to quantise the anchor onto the 256x256 grid.
+    POIs are point features — no rings, no moves, just anchor.
+    Everything else walks rings and emits MOVE tokens per edge.
     """
-    rings = list(_iter_rings(geom))
+    if raw.kind == "POI":
+        if raw.geom is None or raw.geom.is_empty:
+            return None
+        tokens: List[str] = [f"<{raw.kind}_START>", raw.tag_token]
+        tokens.extend(raw.extra_tokens)
+        tokens.extend(anchor_tokens(raw.geom.x, raw.geom.y, bounds))
+        tokens.append(f"<{raw.kind}_END>")
+        return TokenizedObject(
+            kind=raw.kind,
+            tag_token=raw.tag_token,
+            tokens=tokens,
+            centroid_lon=float(raw.geom.x),
+            centroid_lat=float(raw.geom.y),
+        )
+
+    rings = list(_iter_rings(raw.geom))
     if not rings:
         return None
 
-    tokens: List[str] = [f"<{kind}_START>", tag_token]
+    tokens = [f"<{raw.kind}_START>", raw.tag_token]
+    tokens.extend(raw.extra_tokens)
     for i, ring in enumerate(rings):
         (lon0, lat0), moves = tokenize_ring(ring)
         if i > 0:
-            # MultiPolygon part boundary — emit a separator so the model
-            # can learn "new ring starts here".
             tokens.append("<PART_SEP>")
         tokens.extend(anchor_tokens(lon0, lat0, bounds))
         tokens.extend(moves)
-    tokens.append(f"<{kind}_END>")
+    tokens.append(f"<{raw.kind}_END>")
 
-    centroid = geom.centroid
+    centroid = raw.geom.centroid
     return TokenizedObject(
-        kind=kind,
-        tag_token=tag_token,
+        kind=raw.kind,
+        tag_token=raw.tag_token,
         tokens=tokens,
         centroid_lon=float(centroid.x),
         centroid_lat=float(centroid.y),
@@ -372,129 +580,241 @@ def tokenize_row(
 
 
 # ---------------------------------------------------------------------------
-# Pipeline stages
+# PBF parsing
 # ---------------------------------------------------------------------------
 
 
 class _OSMCollector(osmium.SimpleHandler):
-    """pyosmium handler that accumulates highway LineStrings and
-    building MultiPolygons with their tag values.
+    """pyosmium handler that accumulates every target feature class with
+    its tag attributes. Geometries come out as shapely objects; numeric
+    attributes (levels/speed/surface) are retained as raw strings and
+    bucketed downstream.
 
-    We keep tag values as plain strings and geometries as shapely
-    objects (converted from pyosmium's WKB output).
+    Buckets:
+        * nodes (amenity / shop)           -> pois
+        * ways  (highway)                  -> roads
+        * ways  (waterway)                 -> waterways
+        * ways  (railway)                  -> railways
+        * areas (building)                 -> buildings
+        * areas (landuse | natural=water)  -> landuses
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._wkbf = osmium.geom.WKBFactory()
-        self.buildings: List[Tuple[BaseGeometry, str]] = []
-        self.roads: List[Tuple[BaseGeometry, str]] = []
+        self.pois: List[Tuple[float, float, str]] = []
+        # (geom, highway_tag, maxspeed_raw, surface_raw)
+        self.roads: List[Tuple[BaseGeometry, str, Optional[str], Optional[str]]] = []
+        self.waterways: List[Tuple[BaseGeometry, str]] = []
+        self.railways: List[Tuple[BaseGeometry, str]] = []
+        # (geom, building_tag, building_levels_raw)
+        self.buildings: List[Tuple[BaseGeometry, str, Optional[str]]] = []
+        # (geom, landuse_bucket_key)
+        self.landuses: List[Tuple[BaseGeometry, str]] = []
+
+        self._n_node_fail = 0
         self._n_way_fail = 0
         self._n_area_fail = 0
 
-    def way(self, w) -> None:  # pyosmium callback
-        hw = w.tags.get("highway")
-        if hw is None:
+    # -- node ---------------------------------------------------------------
+
+    def node(self, n) -> None:
+        tags = n.tags
+        amenity = tags.get("amenity")
+        shop = tags.get("shop")
+        if amenity is None and shop is None:
+            return
+        category = _bucket_poi(amenity, shop)
+        if category is None:
+            return
+        try:
+            loc = n.location
+            lon, lat = loc.lon, loc.lat
+        except Exception:
+            self._n_node_fail += 1
+            return
+        self.pois.append((lon, lat, category))
+
+    # -- way ----------------------------------------------------------------
+
+    def way(self, w) -> None:
+        tags = w.tags
+        hw = tags.get("highway")
+        ww = tags.get("waterway")
+        rw = tags.get("railway")
+        if hw is None and ww is None and rw is None:
             return
         try:
             wkb_hex = self._wkbf.create_linestring(w)
         except Exception:
-            # Incomplete node refs, self-intersecting geometry, etc.
             self._n_way_fail += 1
             return
         geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
-        self.roads.append((geom, hw))
+        # Highway wins if both keys somehow set (rare).
+        if hw is not None:
+            self.roads.append(
+                (geom, hw, tags.get("maxspeed"), tags.get("surface"))
+            )
+        elif ww is not None:
+            self.waterways.append((geom, ww))
+        elif rw is not None:
+            self.railways.append((geom, rw))
 
-    def area(self, a) -> None:  # pyosmium callback
-        # The area handler fires for both closed-way and relation-built
-        # multipolygons. We filter to building=* here.
-        b = a.tags.get("building")
-        if b is None:
+    # -- area ---------------------------------------------------------------
+
+    def area(self, a) -> None:
+        tags = a.tags
+        building = tags.get("building")
+        landuse = tags.get("landuse")
+        natural = tags.get("natural")
+
+        want_building = building is not None
+        want_landuse = (landuse is not None) or (natural == "water") or (natural in NATURAL_TO_CATEGORY)
+
+        if not want_building and not want_landuse:
             return
+
         try:
             wkb_hex = self._wkbf.create_multipolygon(a)
         except Exception:
             self._n_area_fail += 1
             return
         geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
-        self.buildings.append((geom, b))
+
+        if want_building:
+            self.buildings.append((geom, building, tags.get("building:levels")))
+            return
+
+        bucket = _bucket_landuse(landuse, natural)
+        if bucket is None:
+            return
+        self.landuses.append((geom, bucket))
 
 
-def load_pbf(pbf_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Parse the PBF with pyosmium and return (buildings_df, roads_df).
-
-    Both dataframes are plain pandas with a `geometry` column (shapely)
-    plus a string tag column (`building` or `highway`).
-
-    pyosmium's SimpleHandler streams the file once: node locations are
-    cached in a memory-mapped index, ways are reconstructed on the fly,
-    and multipolygon areas are assembled from ways/relations before the
-    `area()` callback fires. This keeps peak memory low even for
-    country-scale extracts.
-    """
+def load_pbf(pbf_path: str) -> _OSMCollector:
+    """Parse the PBF via pyosmium and return the populated collector."""
     logger.info("loading PBF via pyosmium: %s", pbf_path)
     handler = _OSMCollector()
     handler.apply_file(pbf_path, locations=True, idx="flex_mem")
-
-    buildings = pd.DataFrame(handler.buildings, columns=["geometry", "building"])
-    roads = pd.DataFrame(handler.roads, columns=["geometry", "highway"])
-
     logger.info(
-        "loaded: %d buildings, %d road segments (skipped %d ways, %d areas)",
-        len(buildings), len(roads),
-        handler._n_way_fail, handler._n_area_fail,
+        "loaded: %d buildings, %d roads, %d pois, %d landuses, %d waterways, %d railways",
+        len(handler.buildings),
+        len(handler.roads),
+        len(handler.pois),
+        len(handler.landuses),
+        len(handler.waterways),
+        len(handler.railways),
     )
-    return buildings, roads
+    logger.info(
+        "skipped (bad geometry): %d nodes, %d ways, %d areas",
+        handler._n_node_fail, handler._n_way_fail, handler._n_area_fail,
+    )
+    return handler
 
 
-@dataclass
-class _RawObject:
-    """A simplified geometry plus its kind/tag, pre-tokenization."""
-    geom: BaseGeometry
-    kind: str        # "BUILDING" or "ROAD"
-    tag_token: str   # e.g. "<TAG_RESIDENTIAL>"
+# ---------------------------------------------------------------------------
+# Simplification + raw-object assembly
+# ---------------------------------------------------------------------------
 
 
-def simplify_geometries(
-    buildings: pd.DataFrame,
-    roads: pd.DataFrame,
-) -> List[_RawObject]:
-    """Apply Ramer-Douglas-Peucker simplification and tag bucketing.
-    Tokenization is deferred until the chunk bounding box is known.
+def _simplify(geom: BaseGeometry) -> Optional[BaseGeometry]:
+    """Ramer-Douglas-Peucker simplification, skipping points."""
+    if geom is None or geom.is_empty:
+        return None
+    if isinstance(geom, Point):
+        return geom
+    simplified = geom.simplify(SIMPLIFY_TOLERANCE_DEG, preserve_topology=False)
+    if simplified.is_empty:
+        return None
+    return simplified
+
+
+def build_raw_objects(collector: _OSMCollector) -> List[_RawObject]:
+    """Apply simplification + tag bucketing to every collected feature
+    and return a single flat list of _RawObject ready for tokenization.
     """
     out: List[_RawObject] = []
 
-    logger.info("simplifying %d buildings", len(buildings))
-    for geom, tag in zip(buildings["geometry"], buildings["building"]):
-        if geom is None or geom.is_empty:
+    logger.info("simplifying %d buildings", len(collector.buildings))
+    for geom, tag, levels_raw in collector.buildings:
+        g = _simplify(geom)
+        if g is None:
             continue
-        geom = geom.simplify(SIMPLIFY_TOLERANCE_DEG, preserve_topology=False)
-        if geom.is_empty:
-            continue
-        tag_token = f"<TAG_{_bucket_building(tag if isinstance(tag, str) else None)}>"
-        out.append(_RawObject(geom=geom, kind="BUILDING", tag_token=tag_token))
+        tag_token = f"<TAG_{_bucket_building(tag)}>"
+        extras: List[str] = []
+        level_tok = _bucket_levels(levels_raw)
+        if level_tok:
+            extras.append(level_tok)
+        out.append(_RawObject(geom=g, kind="BUILDING", tag_token=tag_token, extra_tokens=extras))
 
-    logger.info("simplifying %d road segments", len(roads))
-    for geom, tag in zip(roads["geometry"], roads["highway"]):
-        if geom is None or geom.is_empty:
+    logger.info("simplifying %d roads", len(collector.roads))
+    for geom, tag, maxspeed_raw, surface_raw in collector.roads:
+        g = _simplify(geom)
+        if g is None:
             continue
-        geom = geom.simplify(SIMPLIFY_TOLERANCE_DEG, preserve_topology=False)
-        if geom.is_empty:
-            continue
-        tag_token = f"<TAG_{_bucket_highway(tag if isinstance(tag, str) else None)}>"
-        out.append(_RawObject(geom=geom, kind="ROAD", tag_token=tag_token))
+        tag_token = f"<TAG_{_bucket_highway(tag)}>"
+        extras = []
+        speed_tok = _bucket_speed(maxspeed_raw)
+        if speed_tok:
+            extras.append(speed_tok)
+        surface_tok = _bucket_surface(surface_raw)
+        if surface_tok:
+            extras.append(surface_tok)
+        out.append(_RawObject(geom=g, kind="ROAD", tag_token=tag_token, extra_tokens=extras))
 
-    logger.info("simplified objects: %d", len(out))
+    logger.info("packaging %d POIs", len(collector.pois))
+    for lon, lat, category in collector.pois:
+        out.append(_RawObject(
+            geom=Point(lon, lat),
+            kind="POI",
+            tag_token=f"<TAG_{category}>",
+        ))
+
+    logger.info("simplifying %d landuse polygons", len(collector.landuses))
+    for geom, bucket in collector.landuses:
+        g = _simplify(geom)
+        if g is None:
+            continue
+        out.append(_RawObject(
+            geom=g,
+            kind="LANDUSE",
+            tag_token=f"<TAG_{bucket}>",
+        ))
+
+    logger.info("simplifying %d waterways", len(collector.waterways))
+    for geom, tag in collector.waterways:
+        g = _simplify(geom)
+        if g is None:
+            continue
+        out.append(_RawObject(
+            geom=g,
+            kind="WATERWAY",
+            tag_token=f"<TAG_{_bucket_waterway(tag)}>",
+        ))
+
+    logger.info("simplifying %d railways", len(collector.railways))
+    for geom, tag in collector.railways:
+        g = _simplify(geom)
+        if g is None:
+            continue
+        out.append(_RawObject(
+            geom=g,
+            kind="RAILWAY",
+            tag_token=f"<TAG_{_bucket_railway(tag)}>",
+        ))
+
+    logger.info("total raw objects: %d", len(out))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Pipeline stages: bbox, tokenize, sort
+# ---------------------------------------------------------------------------
 
 
 def compute_bounds(
     raws: Sequence[_RawObject],
 ) -> Tuple[float, float, float, float]:
-    """Aggregate each geometry's bounding box into one chunk-level
-    (min_lon, min_lat, max_lon, max_lat). Stable whether roads or
-    buildings dominate, unlike centroid-only bounds.
-    """
     if not raws:
         raise ValueError("no geometries to bound")
     min_lon = min_lat = math.inf
@@ -521,26 +841,30 @@ def tokenize_objects(
     raws: Sequence[_RawObject],
     bounds: Tuple[float, float, float, float],
 ) -> List[TokenizedObject]:
-    """Tokenize simplified geometries against the chunk bounding box."""
     out: List[TokenizedObject] = []
+    kind_counts: Counter[str] = Counter()
     for r in raws:
-        obj = tokenize_row(r.geom, kind=r.kind, tag_token=r.tag_token, bounds=bounds)
-        if obj is not None:
-            out.append(obj)
+        obj = tokenize_row(r, bounds=bounds)
+        if obj is None:
+            continue
+        out.append(obj)
+        kind_counts[obj.kind] += 1
     logger.info("total tokenized objects: %d", len(out))
+    logger.info("  by kind: %s", dict(kind_counts.most_common()))
     return out
 
 
-def sort_objects_zorder(
+def sort_objects_hilbert(
     objects: List[TokenizedObject],
     bounds: Tuple[float, float, float, float],
 ) -> List[TokenizedObject]:
-    """Sort objects by the Morton (Z-order) key of their centroid,
-    reusing the same chunk bounding box we used for anchor quantisation.
-    """
+    """Global Hilbert-curve sort, reusing the anchor-grid bbox."""
     if not objects:
         return objects
-    keyed = [(morton_key(o.centroid_lon, o.centroid_lat, bounds), o) for o in objects]
+    keyed = [
+        (hilbert_key(o.centroid_lon, o.centroid_lat, bounds), o)
+        for o in objects
+    ]
     keyed.sort(key=lambda kv: kv[0])
     return [o for _, o in keyed]
 
@@ -553,7 +877,6 @@ def sort_objects_zorder(
 def _object_batches(
     objects: Iterable[TokenizedObject], chunk_size: int
 ) -> Iterator[pa.RecordBatch]:
-    """Yield Arrow RecordBatches of size <= chunk_size."""
     schema = pa.schema([
         pa.field("kind", pa.string()),
         pa.field("tag_token", pa.string()),
@@ -612,23 +935,18 @@ def write_parquet(
 
 
 # ---------------------------------------------------------------------------
-# Vocab dump (handy for downstream tokenizer construction)
+# Vocab dump + audit
 # ---------------------------------------------------------------------------
 
 
 def _family_of(token: str) -> str:
-    """Return the token family name, e.g. `<X_142>` -> `X`."""
     body = token.lstrip("<").rstrip(">")
     return body.split("_", 1)[0] if "_" in body else body
 
 
-def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> None:
-    """Write a sorted, deduplicated vocabulary JSON from the corpus and
-    log a family-level audit.
-
-    This is NOT a trained tokenizer — it's the raw set of string tokens
-    produced by the pipeline. HuggingFace tokenizers can be built from
-    this by wrapping it as WordLevel.
+def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> int:
+    """Write a sorted, deduplicated vocabulary JSON from the corpus.
+    Logs a family-level audit and returns the total unique token count.
     """
     vocab: set[str] = set()
     for obj in objects:
@@ -644,7 +962,9 @@ def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> None:
     families = Counter(_family_of(t) for t in vocab)
     logger.info("vocab audit (unique tokens per family):")
     for family, count in families.most_common():
-        logger.info("  %-10s %d", family, count)
+        logger.info("  %-14s %d", family, count)
+
+    return len(vocab)
 
 
 # ---------------------------------------------------------------------------
@@ -654,37 +974,17 @@ def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--input", "-i",
-        required=True,
-        help="Path to the .osm.pbf extract (e.g. Stockholm.osm.pbf)",
-    )
-    parser.add_argument(
-        "--output-dir", "-o",
-        required=True,
-        help="Directory to write tokens + vocab into (created if missing)",
-    )
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=CHUNK_SIZE,
-        help=f"Objects per Parquet row-group (default: {CHUNK_SIZE})",
-    )
-    parser.add_argument(
-        "--vocab-name",
-        default="stockholm_vocab.json",
-        help="Filename for the dumped vocabulary JSON (default: stockholm_vocab.json)",
-    )
-    parser.add_argument(
-        "--output-name",
-        default="stockholm_tokens.parquet",
-        help="Filename for the Parquet output (default: stockholm_tokens.parquet)",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        help="Python logging level (default: INFO)",
-    )
+    parser.add_argument("--input", "-i", required=True,
+                        help="Path to the .osm.pbf extract")
+    parser.add_argument("--output-dir", "-o", required=True,
+                        help="Directory to write tokens + vocab into")
+    parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE,
+                        help=f"Objects per Parquet row-group (default: {CHUNK_SIZE})")
+    parser.add_argument("--vocab-name", default="stockholm_vocab.json")
+    parser.add_argument("--output-name", default="stockholm_tokens.parquet")
+    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--vocab-limit", type=int, default=1000,
+                        help="Hard ceiling on unique tokens (default: 1000)")
     return parser.parse_args(argv)
 
 
@@ -700,31 +1000,39 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Stage 1: parse
-    buildings, roads = load_pbf(args.input)
+    # Stage 1: parse all target feature classes from the PBF.
+    collector = load_pbf(args.input)
 
-    # Stage 2: simplify geometries (tokenization deferred — we need the
-    # chunk bounding box first so the anchor grid is well-defined).
-    raws = simplify_geometries(buildings, roads)
+    # Stage 2: simplify + bucket + assemble _RawObjects.
+    raws = build_raw_objects(collector)
     if not raws:
         logger.error("no geometries survived simplification; aborting")
         return 3
 
-    # Stage 3: compute the chunk bounding box used for both the anchor
-    # grid and the Z-order sort.
+    # Stage 3: chunk-level bounding box (used for grid + Hilbert).
     bounds = compute_bounds(raws)
 
-    # Stage 4: tokenize with local anchor grid + relative moves.
+    # Stage 4: tokenize.
     objects = tokenize_objects(raws, bounds)
 
-    # Stage 5: global Z-order sort using the same bounding box.
-    objects = sort_objects_zorder(objects, bounds)
+    # Stage 5: Hilbert-curve sort by centroid.
+    objects = sort_objects_hilbert(objects, bounds)
 
-    # Stage 6: persist
+    # Stage 6: persist parquet + vocab.
     parquet_path = os.path.join(args.output_dir, args.output_name)
     vocab_path = os.path.join(args.output_dir, args.vocab_name)
     write_parquet(objects, parquet_path, chunk_size=args.chunk_size)
-    dump_vocab(objects, vocab_path)
+    vocab_size = dump_vocab(objects, vocab_path)
+
+    # Vocab ceiling check — the whole point of the bucketing pivot.
+    status = "OK" if vocab_size <= args.vocab_limit else "OVER LIMIT"
+    logger.info(
+        "TOTAL VOCAB SIZE: %d (limit %d) -> %s",
+        vocab_size, args.vocab_limit, status,
+    )
+    if vocab_size > args.vocab_limit:
+        logger.error("vocabulary exceeds --vocab-limit; failing")
+        return 4
 
     logger.info("done.")
     return 0
