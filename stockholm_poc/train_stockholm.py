@@ -2,24 +2,19 @@
 train_stockholm.py
 ==================
 
-The Overfit Test — train a tiny causal Transformer from scratch on the
-Stockholm spatial-token corpus. We deliberately pick a small architecture
-and run enough epochs for the training loss to collapse toward zero,
-proving the model can mathematically learn the grammar (kind START/END
-brackets, anchor-then-moves ordering) and the spatial geometry (which
-MOVE tokens plausibly follow which X/Y anchor) of our tokenizer.
+Tier-C training run — train a GPT-2-class causal Transformer from
+scratch on the Stockholm spatial-token corpus.
 
-Stages
-------
-1. Load the vocabulary JSON, build `{str_token: int_id}` mapping.
-2. Stream the Parquet file via `datasets`, map each per-object token list
-   to integer IDs, then concatenate and chunk into fixed-size 1024-token
-   blocks for causal LM training.
-3. Build a tiny `GPT2LMHeadModel` from scratch (no pretrained weights)
-   with vocab_size tied to the real vocabulary.
-4. Train with `Trainer` on AdamW, lr=3e-4, standard cross-entropy CLM
-   loss. Log every 50 steps; save best/final weights under
-   `./checkpoints/stockholm_overfit`.
+Architecture (defaults):
+  * 12 layers, 12 heads, 768-d embeddings (~86 M parameters)
+  * Context length 2048, bf16 on A100
+  * 40 epochs on the full corpus with a 90/10 train/val split
+  * AdamW, lr 3e-4, cosine schedule, 200-step warmup
+  * Evaluate val loss once per epoch so we can see train vs. val
+    divergence (generalisation gap).
+
+All overrides are exposed as CLI flags so the same script drives any
+tier (A / B / C) or a fast smoke test.
 """
 
 from __future__ import annotations
@@ -30,8 +25,6 @@ import logging
 import os
 import sys
 from typing import Dict, List, Optional
-
-import numpy as np
 
 from datasets import load_dataset
 from transformers import (
@@ -53,8 +46,8 @@ logger = logging.getLogger("train_stockholm")
 
 def load_vocab(path: str) -> Dict[str, int]:
     """Read the tokenizer's vocab JSON and return a deterministic
-    `{str_token: int_id}` mapping. IDs are assigned by the sorted order
-    of tokens so the mapping is reproducible across machines / runs.
+    `{str_token: int_id}` mapping. IDs are assigned by sorted token
+    order so the mapping is reproducible across machines and runs.
     """
     with open(path, "r", encoding="utf-8") as fh:
         payload = json.load(fh)
@@ -78,12 +71,12 @@ def build_dataset(
     token_to_id: Dict[str, int],
     block_size: int,
     num_proc: int,
+    val_fraction: float,
+    seed: int,
 ):
     """Stream per-object token lists out of the Parquet file, map to int
-    IDs, concatenate, and chunk into fixed-size causal-LM blocks.
-
-    Returns a HuggingFace `Dataset` with `input_ids` and `labels` columns
-    (labels == input_ids for next-token prediction).
+    IDs, concatenate, and chunk into fixed-size causal-LM blocks, then
+    split into train/val.
     """
     logger.info("loading parquet dataset: %s", parquet_path)
     raw = load_dataset("parquet", data_files=parquet_path, split="train")
@@ -93,7 +86,7 @@ def build_dataset(
 
     def to_ids(batch):
         # Map each per-object token list to its integer IDs. Unknown
-        # tokens would be a bug in the vocab dump — blow up loudly.
+        # tokens would be a vocab-dump bug — blow up loudly.
         out = []
         for seq in batch["tokens"]:
             out.append([token_to_id[t] for t in seq])
@@ -128,10 +121,21 @@ def build_dataset(
     )
 
     logger.info(
-        "training blocks: %d (block_size=%d, total_tokens=%d)",
+        "total blocks: %d (block_size=%d, tokens=%d)",
         len(chunked), block_size, len(chunked) * block_size,
     )
-    return chunked
+
+    if val_fraction > 0:
+        split = chunked.train_test_split(test_size=val_fraction, seed=seed)
+        train_ds, val_ds = split["train"], split["test"]
+        logger.info(
+            "split train=%d / val=%d blocks (val_fraction=%.2f)",
+            len(train_ds), len(val_ds), val_fraction,
+        )
+    else:
+        train_ds, val_ds = chunked, None
+
+    return train_ds, val_ds
 
 
 # ---------------------------------------------------------------------------
@@ -139,26 +143,32 @@ def build_dataset(
 # ---------------------------------------------------------------------------
 
 
-def build_model(vocab_size: int, block_size: int) -> GPT2LMHeadModel:
-    """Tiny GPT-2 from scratch. The 6L/6H/384 dim config is small enough
-    to overfit ~15M tokens quickly on a single A100, which is exactly
-    what the Overfit Test wants.
-    """
+def build_model(
+    vocab_size: int,
+    block_size: int,
+    n_layer: int,
+    n_head: int,
+    n_embd: int,
+) -> GPT2LMHeadModel:
+    """GPT-2 from scratch at the requested capacity."""
     config = GPT2Config(
         vocab_size=vocab_size,
-        n_layer=6,
-        n_head=6,
-        n_embd=384,
+        n_layer=n_layer,
+        n_head=n_head,
+        n_embd=n_embd,
         n_positions=block_size,
         n_ctx=block_size,
         bos_token_id=0,
         eos_token_id=0,
-        use_cache=False,  # redundant during training, saves a bit of memory
+        use_cache=False,  # redundant at train-time, saves some memory
     )
     model = GPT2LMHeadModel(config)
 
     n_params = sum(p.numel() for p in model.parameters())
-    logger.info("model built from scratch: %.2fM parameters", n_params / 1e6)
+    logger.info(
+        "model built: %dL/%dH/%dD -> %.2fM parameters",
+        n_layer, n_head, n_embd, n_params / 1e6,
+    )
     return model
 
 
@@ -170,8 +180,10 @@ def build_model(vocab_size: int, block_size: int) -> GPT2LMHeadModel:
 def build_trainer(
     model: GPT2LMHeadModel,
     train_ds,
+    val_ds,
     output_dir: str,
     per_device_batch_size: int,
+    per_device_eval_batch_size: int,
     num_train_epochs: float,
     learning_rate: float,
     weight_decay: float,
@@ -180,18 +192,24 @@ def build_trainer(
     save_epochs: bool,
     bf16: bool,
     dataloader_num_workers: int,
+    gradient_accumulation_steps: int,
     seed: int,
 ) -> Trainer:
+    eval_strategy = "epoch" if val_ds is not None else "no"
+
     args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_batch_size,
+        per_device_eval_batch_size=per_device_eval_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         warmup_steps=warmup_steps,
         logging_steps=logging_steps,
         logging_first_step=True,
+        eval_strategy=eval_strategy,
         save_strategy="epoch" if save_epochs else "no",
         save_total_limit=2,
         bf16=bf16,
@@ -201,13 +219,14 @@ def build_trainer(
         report_to=["none"],
         seed=seed,
         lr_scheduler_type="cosine",
-        # Overfit test: do NOT add dropout, early stopping, eval split.
-        # We *want* train loss -> 0.
+        # Overfit test: keep dropout default (0) and no early stopping —
+        # we want the train curve to collapse.
     )
     return Trainer(
         model=model,
         args=args,
         train_dataset=train_ds,
+        eval_dataset=val_ds,
         data_collator=default_data_collator,
     )
 
@@ -219,27 +238,32 @@ def build_trainer(
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--parquet", required=True,
-                        help="Path to stockholm_tokens.parquet")
-    parser.add_argument("--vocab", required=True,
-                        help="Path to stockholm_vocab.json")
+    # Data
+    parser.add_argument("--parquet", required=True)
+    parser.add_argument("--vocab", required=True)
     parser.add_argument("--output-dir",
-                        default="./checkpoints/stockholm_overfit",
-                        help="Checkpoint directory")
-    parser.add_argument("--block-size", type=int, default=1024)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--epochs", type=float, default=3.0)
+                        default="./checkpoints/stockholm_overfit")
+    parser.add_argument("--val-fraction", type=float, default=0.1,
+                        help="Fraction of blocks to hold out as val (0 disables eval)")
+    # Tokenisation / chunking
+    parser.add_argument("--block-size", type=int, default=2048)
+    parser.add_argument("--num-proc", type=int, default=4)
+    # Model
+    parser.add_argument("--n-layer", type=int, default=12)
+    parser.add_argument("--n-head", type=int, default=12)
+    parser.add_argument("--n-embd", type=int, default=768)
+    # Training
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--eval-batch-size", type=int, default=16)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--epochs", type=float, default=40.0)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-steps", type=int, default=200)
     parser.add_argument("--logging-steps", type=int, default=50)
-    parser.add_argument("--no-save-epochs", action="store_true",
-                        help="Disable per-epoch checkpointing")
+    parser.add_argument("--no-save-epochs", action="store_true")
     parser.add_argument("--dataloader-workers", type=int, default=4)
-    parser.add_argument("--num-proc", type=int, default=4,
-                        help="Workers for dataset.map() preprocessing")
-    parser.add_argument("--bf16", action="store_true", default=True,
-                        help="Use bf16 (A100 native); disable with --no-bf16")
+    parser.add_argument("--bf16", action="store_true", default=True)
     parser.add_argument("--no-bf16", dest="bf16", action="store_false")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-level", default="INFO")
@@ -261,31 +285,37 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("vocab not found: %s", args.vocab)
         return 2
 
-    # Vocab.
     token_to_id = load_vocab(args.vocab)
     vocab_size = len(token_to_id)
     logger.info("vocab size: %d", vocab_size)
 
-    # Dataset.
-    train_ds = build_dataset(
+    train_ds, val_ds = build_dataset(
         parquet_path=args.parquet,
         token_to_id=token_to_id,
         block_size=args.block_size,
         num_proc=args.num_proc,
+        val_fraction=args.val_fraction,
+        seed=args.seed,
     )
     if len(train_ds) == 0:
         logger.error("no training blocks produced; aborting")
         return 3
 
-    # Model.
-    model = build_model(vocab_size=vocab_size, block_size=args.block_size)
+    model = build_model(
+        vocab_size=vocab_size,
+        block_size=args.block_size,
+        n_layer=args.n_layer,
+        n_head=args.n_head,
+        n_embd=args.n_embd,
+    )
 
-    # Trainer.
     trainer = build_trainer(
         model=model,
         train_ds=train_ds,
+        val_ds=val_ds,
         output_dir=args.output_dir,
         per_device_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
         num_train_epochs=args.epochs,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
@@ -294,6 +324,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         save_epochs=not args.no_save_epochs,
         bf16=args.bf16,
         dataloader_num_workers=args.dataloader_workers,
+        gradient_accumulation_steps=args.grad_accum_steps,
         seed=args.seed,
     )
 
@@ -301,7 +332,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     train_result = trainer.train()
     trainer.save_model(os.path.join(args.output_dir, "final"))
 
-    # Persist the token<->id mapping alongside the model so any loader
+    # Persist the token <-> id mapping alongside the model so any loader
     # can decode generated integer IDs back to human-readable tokens.
     mapping_path = os.path.join(args.output_dir, "final", "token_to_id.json")
     with open(mapping_path, "w", encoding="utf-8") as fh:
@@ -309,7 +340,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("token mapping saved to %s", mapping_path)
 
     metrics = train_result.metrics
-    logger.info("final metrics: %s", metrics)
+    logger.info("final train metrics: %s", metrics)
+    if val_ds is not None:
+        eval_metrics = trainer.evaluate()
+        logger.info("final eval metrics: %s", eval_metrics)
     return 0
 
 

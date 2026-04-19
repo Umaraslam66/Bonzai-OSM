@@ -90,9 +90,11 @@ python "${SCRIPT_DIR}/train_stockholm.py" \
   --parquet "${PARQUET}" \
   --vocab "${VOCAB}" \
   --output-dir "${CKPT_DIR}" \
-  --block-size 1024 \
-  --batch-size 8 \
-  --epochs 3 \
+  --block-size 2048 \
+  --n-layer 12 --n-head 12 --n-embd 768 \
+  --batch-size 16 --eval-batch-size 16 \
+  --epochs 40 \
+  --val-fraction 0.1 \
   --learning-rate 3e-4 \
   --warmup-steps 200 \
   --logging-steps 50 \
