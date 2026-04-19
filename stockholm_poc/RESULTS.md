@@ -1,59 +1,83 @@
 # Stockholm PoC — Results
 
-First end-to-end run of the tokenization pipeline on the BBBike
-Stockholm extract, executed on Leonardo's budget-free
-`lrd_all_serial` partition.
+Evolution of the spatial tokenization pipeline on the BBBike Stockholm
+extract, executed on Leonardo's budget-free `lrd_all_serial` partition.
+Zero core-hours burnt across all three runs.
 
-## Run summary
+## V2.1 (current) — percentile bbox + full feature coverage
 
-| Field            | Value                                                 |
-|------------------|-------------------------------------------------------|
-| Date             | 2026-04-19                                            |
-| Leonardo account | `AIFAC_P02_222`                                       |
-| Partition        | `lrd_all_serial` (budget-free)                        |
-| SLURM job IDs    | `40148107` (H3 anchor), `40148589` (X/Y grid anchor)  |
-| Wall time        | 91 s → 77 s after H3 → X/Y swap                       |
-| Peak RSS         | 1.16 GB                                               |
-| Core-hours burnt | 0 (free partition)                                    |
-| Input PBF        | `Stockholm.osm.pbf` (54 MB, BBBike)                   |
-| Output parquet   | 15 MB (60 row groups, zstd)                           |
-| Output vocab     | 9 KB                                                  |
+| Field            | Value                                  |
+|------------------|----------------------------------------|
+| SLURM job        | `40206301` on `lrd_all_serial`         |
+| Wall time        | ~120 s                                 |
+| Input PBF        | `Stockholm.osm.pbf` (54 MB, BBBike)    |
+| Parquet output   | 18 MB, 69 row groups, zstd             |
+| Objects          | **688,551** (6 feature kinds)          |
+| **Total vocab**  | **666 tokens** (ceiling 1000)          |
 
-## Vocabulary audit — the anchor pivot
+### Objects by kind
 
-Initial H3-res-11 anchor design exploded the vocabulary. Replaced with
-a chunk-local 256x256 grid emitting `<X_ix>` + `<Y_iy>` tokens. Same
-corpus, same row count:
+| Kind      | Count   | GDAL reference | Match |
+|-----------|---------|----------------|-------|
+| BUILDING  | 369,723 | 369,782        | ✓     |
+| ROAD      | 229,113 | 228,902        | ✓     |
+| LANDUSE   | 44,344  | —              | new   |
+| POI       | 35,810  | 50,411 poi-like | subset (amenity/shop only) |
+| WATERWAY  | 4,869   | 4,863          | ✓     |
+| RAILWAY   | 4,692   | 4,403          | ✓     |
 
-| Family       | H3 anchor (before) | X/Y grid (after) |
-|--------------|--------------------|------------------|
-| Anchor       | 288,966 (H3)       | **482** (X+Y)    |
-| MOVE         | 69                 | 69               |
-| TAG          | 33                 | 33               |
-| BUILDING/ROAD start+end | 4        | 4                |
-| PART_SEP     | 1                  | 1                |
-| **Total**    | **289,073**        | **589**          |
+### Vocabulary audit
 
-490x reduction in vocabulary with no information loss — moves still
-carry the fine-grained shape; anchors only need to place the object
-within its chunk.
+| Family        | Unique | Notes                                     |
+|---------------|-------:|-------------------------------------------|
+| `X`           | 256    | full grid (percentile bbox)               |
+| `Y`           | 256    | full grid                                 |
+| `MOVE`        | 72     | 8 dirs × 9 distance buckets + edges       |
+| `TAG`         | 60     | bucketed across 6 kinds                   |
+| `LEVELS`      | 4      | 1-2, 3-5, 6-10, 11+                       |
+| `SPEED`       | 3      | low <40, mid 40-70, high >70 kph          |
+| `SURFACE`     | 2      | paved, unpaved                            |
+| start/end × 6 | 12     | BUILDING/ROAD/POI/LANDUSE/WATERWAY/RAILWAY |
+| `PART_SEP`    | 1      | MultiPolygon ring separator               |
+| **Total**     | **666** | under 1000-token ceiling                |
 
-Note: X/Y families show 238 and 244 (not the full 256) because the
-chunk bounding box is the tight enclosing rectangle — the extreme
-corner cells simply contain no anchor points.
-
-## Corpus
-
-- Tokenized objects: **598,836**
-- First row sample:
+### Sample sequences
 
 ```
-<ROAD_START> <TAG_UNCLASSIFIED> <X_31> <Y_11>
-<MOVE_N_15M> <MOVE_N_5M> <MOVE_N_50M> <MOVE_N_25M> <MOVE_N_5M>
-<MOVE_N_10M> <MOVE_N_10M> <MOVE_N_10M> <MOVE_NW_50M> <MOVE_NW_10M>
-<MOVE_NW_10M> <MOVE_N_10M> <MOVE_N_15M> <MOVE_N_25M> <MOVE_N_10M>
-<MOVE_NE_25M> ...
+BUILDING: <BUILDING_START> <TAG_YES> <X_0> <Y_0> <MOVE_SE_5M> <MOVE_SE_5M>
+          <MOVE_NE_5M> <MOVE_NW_15M> <MOVE_SW_10M> <BUILDING_END>
+
+ROAD:     <ROAD_START> <TAG_RESIDENTIAL> <SURFACE_PAVED> <X_0> <Y_0>
+          <MOVE_W_25M> <MOVE_W_15M> <MOVE_W_5M> <MOVE_W_50M> <ROAD_END>
+
+POI:      <POI_START> <TAG_PUBLIC_AMENITY> <X_0> <Y_0> <POI_END>
+
+LANDUSE:  <LANDUSE_START> <TAG_RESIDENTIAL> <X_0> <Y_0>
+          <MOVE_S_15M> ... <LANDUSE_END>
+
+WATERWAY: <WATERWAY_START> <TAG_STREAM> <X_0> <Y_1>
+          <MOVE_SE_50M> ... <WATERWAY_END>
+
+RAILWAY:  <RAILWAY_START> <TAG_RAIL> <X_2> <Y_0>
+          <MOVE_NE_100M> ... <RAILWAY_END>
 ```
+
+## Version history
+
+| Version | Anchor strategy        | Vocab   | Kinds | Features tokenized |
+|---------|------------------------|--------:|------:|-------------------:|
+| V1      | H3 res-11              | 289,073 | 2     | 598,836            |
+| V2      | 256x256 grid, min/max bbox | 251 | 6     | 688,551            |
+| V2.1    | 256x256 grid, percentile bbox | 666 | 6 | 688,551            |
+
+- V1 → V2: H3 vocab blew up with area. Swapped to chunk-local X/Y grid
+  and added POI/LANDUSE/WATERWAY/RAILWAY + attribute tokens (LEVELS,
+  SPEED, SURFACE).
+- V2 → V2.1: min/max bbox was pulled huge by a few outlier waterway
+  and landuse relations, wasting ~80% of the anchor grid. Switched to
+  p0.5/p99.5 percentile bbox: outliers clamp to `<X_0>`/`<X_255>`
+  explicit-edge sentinels, city core gets the full 256 cells. V2's
+  251-token vocab was misleadingly low — it only used 44×53 cells.
 
 ## Artifact paths on Leonardo
 
@@ -63,16 +87,14 @@ $WORK/stockholm_poc/outputs/stockholm_tokens.parquet
 $WORK/stockholm_poc/outputs/stockholm_vocab.json
 ```
 
-## Implications for scaling
+## Scaling implications
 
-- **Global vocabulary no longer scales with area.** Per-chunk anchor
-  vocab is capped at `2 * GRID_SIZE` = 512 tokens regardless of chunk
-  size. World-scale vocab grows only with the count of
-  MOVE/TAG/structural tokens, which are bounded by design.
-- **Chunk boundary is the new knob.** The grid resolution inside a
-  chunk is `bbox_span / 256`. For Stockholm (~0.6 deg span),
-  each cell is ~260 m wide — coarser than H3 res 11 by design, with
-  the MOVE tokens carrying sub-cell detail.
-- **Next decision:** what defines a "chunk" globally? Candidates are
-  S2 cells at a chosen level, H3 parents at a coarse resolution, or
-  administrative regions. To be decided before full-planet extraction.
+- Per-chunk vocabulary is now capped and stable. For planet scale, only
+  chunk-level MOVE/TAG/structural tokens need to merge; anchors stay
+  fixed at 512 slots.
+- Percentile bbox generalises to any region (rural, oceanic, mixed) —
+  no dependence on buildings being the dominant class.
+- 334 tokens of headroom under the 1000-token ceiling for future
+  attribute additions (building materials, road lanes, etc.).
+- Next decision: what defines a "chunk" globally (S2 level, H3 parent,
+  admin region). To pick before full-planet extraction.
