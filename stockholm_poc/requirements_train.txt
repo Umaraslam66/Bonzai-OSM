@@ -1,0 +1,13 @@
+# Training dependencies for train_stockholm.py.
+#
+# Install INTO the existing tokenization venv:
+#   source "$WORK/stockholm_poc/venv/bin/activate"
+#   pip install -r requirements_train.txt
+#
+# PyTorch wheels from the default PyPI index ship with CUDA 12.1 runtime
+# bundled, which is compatible with Leonardo's CUDA 12.3 driver. No
+# `--index-url` override needed unless we need an exact CUDA version.
+torch>=2.3,<3
+transformers>=4.40,<5
+datasets>=2.18,<4
+accelerate>=0.28
