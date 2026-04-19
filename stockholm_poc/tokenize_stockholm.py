@@ -812,27 +812,52 @@ def build_raw_objects(collector: _OSMCollector) -> List[_RawObject]:
 # ---------------------------------------------------------------------------
 
 
+BBOX_PERCENTILE_LOW = 0.5
+BBOX_PERCENTILE_HIGH = 99.5
+
+
 def compute_bounds(
     raws: Sequence[_RawObject],
+    low_pct: float = BBOX_PERCENTILE_LOW,
+    high_pct: float = BBOX_PERCENTILE_HIGH,
 ) -> Tuple[float, float, float, float]:
+    """Robust chunk bounding box via centroid percentiles.
+
+    Raw `geom.bounds`-union is pathologically sensitive to outliers: a
+    single waterway or landuse relation that extends outside the chunk
+    stretches the bbox and wastes the 256-cell anchor grid on empty
+    space. We take the Nth / (100-N)th percentile of object *centroids*
+    instead — a few genuine outliers get clamped to the grid edges by
+    `anchor_tokens` (cheap, explicit `<X_0>`/`<X_255>` sentinels), while
+    the dense core of the chunk gets full anchor resolution.
+    """
     if not raws:
         raise ValueError("no geometries to bound")
-    min_lon = min_lat = math.inf
-    max_lon = max_lat = -math.inf
-    for r in raws:
-        mnx, mny, mxx, mxy = r.geom.bounds
-        if mnx < min_lon:
-            min_lon = mnx
-        if mny < min_lat:
-            min_lat = mny
-        if mxx > max_lon:
-            max_lon = mxx
-        if mxy > max_lat:
-            max_lat = mxy
+
+    lons = np.fromiter(
+        (r.geom.centroid.x for r in raws), dtype=np.float64, count=len(raws)
+    )
+    lats = np.fromiter(
+        (r.geom.centroid.y for r in raws), dtype=np.float64, count=len(raws)
+    )
+
+    min_lon = float(np.percentile(lons, low_pct))
+    max_lon = float(np.percentile(lons, high_pct))
+    min_lat = float(np.percentile(lats, low_pct))
+    max_lat = float(np.percentile(lats, high_pct))
     bounds = (min_lon, min_lat, max_lon, max_lat)
+
+    n_out_lon = int(((lons < min_lon) | (lons > max_lon)).sum())
+    n_out_lat = int(((lats < min_lat) | (lats > max_lat)).sum())
     logger.info(
-        "chunk bbox: lon [%.5f, %.5f], lat [%.5f, %.5f]",
-        bounds[0], bounds[2], bounds[1], bounds[3],
+        "chunk bbox (p%.1f/%.1f): lon [%.5f, %.5f], lat [%.5f, %.5f]",
+        low_pct, high_pct, bounds[0], bounds[2], bounds[1], bounds[3],
+    )
+    logger.info(
+        "  centroids clamped to edge: %d lon, %d lat (%.2f%% of %d)",
+        n_out_lon, n_out_lat,
+        100.0 * max(n_out_lon, n_out_lat) / max(len(raws), 1),
+        len(raws),
     )
     return bounds
 
