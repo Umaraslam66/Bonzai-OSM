@@ -1,13 +1,17 @@
 # Training dependencies for train_stockholm.py.
 #
+# IMPORTANT — Leonardo runs NVIDIA driver 535.x which only supports
+# CUDA runtime up to ~12.3. The torch wheels on the default PyPI index
+# currently ship with CUDA 13.x, which silently returns
+# `torch.cuda.is_available() == False` on Leonardo. We therefore pin to
+# a CUDA 12.1 build and pull it from PyTorch's own index.
+#
 # Install INTO the existing tokenization venv:
 #   source "$WORK/stockholm_poc/venv/bin/activate"
-#   pip install -r requirements_train.txt
-#
-# PyTorch wheels from the default PyPI index ship with CUDA 12.1 runtime
-# bundled, which is compatible with Leonardo's CUDA 12.3 driver. No
-# `--index-url` override needed unless we need an exact CUDA version.
-torch>=2.3,<3
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
+#       -r requirements_train.txt
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
 transformers>=4.40,<5
 datasets>=2.18,<4
 accelerate>=0.28
