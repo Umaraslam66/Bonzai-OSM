@@ -1,0 +1,10 @@
+# Dependencies for global_osm_eda.py.
+#
+# Stage 1 (pyosmium) is already present in the base venv; we add
+# PySpark here for stage 2. PySpark 3.5+ needs a Java 17 (or 11)
+# runtime, which comes from Leonardo's `java/` module.
+#
+# Install INTO the existing tokenization venv:
+#   source "$WORK/stockholm_poc/venv/bin/activate"
+#   pip install -r requirements_eda.txt
+pyspark>=3.5,<4
