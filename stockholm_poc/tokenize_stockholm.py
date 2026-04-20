@@ -126,6 +126,10 @@ BUILDING_CLASSES = {
     "commercial", "retail", "industrial", "office", "warehouse",
     "school", "church", "hospital", "garage", "hut", "shed",
     "public", "civic",
+    # Long-tail but distinctive globally (from TagInfo top-20):
+    "roof", "cabin", "greenhouse", "barn", "service",
+    "hangar", "stadium", "farm_auxiliary", "kindergarten",
+    "university", "college",
 }
 
 # POI categories — ~20 broad buckets over amenity=* / shop=* values.
@@ -190,39 +194,179 @@ AMENITY_TO_CATEGORY: Dict[str, str] = {
     "gym": "RECREATION",
 }
 
-# Shop values: almost everything is retail, but food-adjacent shops get
-# their own RETAIL_GROCERY bucket so the model can distinguish daily-
-# errand land-use patterns.
+# Shop values split into ~13 sub-categories. Every shop=* value on the
+# OSM planet lands in exactly one of these; unknown values fall through
+# to plain RETAIL. The categories were chosen from TagInfo's top-500
+# shop values so they actually cover real-world distribution, not
+# guesses.
 SHOP_TO_CATEGORY: Dict[str, str] = {
+    # -- Groceries & food ---------------------------------------------------
     "supermarket": "RETAIL_GROCERY", "convenience": "RETAIL_GROCERY",
     "bakery": "RETAIL_GROCERY", "butcher": "RETAIL_GROCERY",
     "greengrocer": "RETAIL_GROCERY", "alcohol": "RETAIL_GROCERY",
     "wine": "RETAIL_GROCERY", "seafood": "RETAIL_GROCERY",
     "cheese": "RETAIL_GROCERY", "deli": "RETAIL_GROCERY",
-    "farm": "RETAIL_GROCERY",
+    "farm": "RETAIL_GROCERY", "dairy": "RETAIL_GROCERY",
+    "chocolate": "RETAIL_GROCERY", "confectionery": "RETAIL_GROCERY",
+    "coffee": "RETAIL_GROCERY", "tea": "RETAIL_GROCERY",
+    "pastry": "RETAIL_GROCERY", "frozen_food": "RETAIL_GROCERY",
+    "health_food": "RETAIL_GROCERY", "spices": "RETAIL_GROCERY",
+    "organic": "RETAIL_GROCERY", "beverages": "RETAIL_GROCERY",
+    # -- Clothing & accessories --------------------------------------------
+    "clothes": "RETAIL_FASHION", "shoes": "RETAIL_FASHION",
+    "jewelry": "RETAIL_FASHION", "bag": "RETAIL_FASHION",
+    "fashion_accessories": "RETAIL_FASHION", "watches": "RETAIL_FASHION",
+    "leather": "RETAIL_FASHION", "tailor": "RETAIL_FASHION",
+    "boutique": "RETAIL_FASHION", "fabric": "RETAIL_FASHION",
+    # -- Personal services (trade-services & body-care) --------------------
+    "hairdresser": "RETAIL_SERVICES", "beauty": "RETAIL_SERVICES",
+    "laundry": "RETAIL_SERVICES", "dry_cleaning": "RETAIL_SERVICES",
+    "massage": "RETAIL_SERVICES", "tattoo": "RETAIL_SERVICES",
+    "travel_agency": "RETAIL_SERVICES", "nails": "RETAIL_SERVICES",
+    "shoe_repair": "RETAIL_SERVICES", "funeral_directors": "RETAIL_SERVICES",
+    "copyshop": "RETAIL_SERVICES", "pawnbroker": "RETAIL_SERVICES",
+    "locksmith": "RETAIL_SERVICES",
+    # -- Automotive ---------------------------------------------------------
+    "car_repair": "RETAIL_AUTO", "car": "RETAIL_AUTO",
+    "motorcycle": "RETAIL_AUTO", "motorcycle_repair": "RETAIL_AUTO",
+    "car_parts": "RETAIL_AUTO", "tyres": "RETAIL_AUTO",
+    "truck": "RETAIL_AUTO", "trailer": "RETAIL_AUTO",
+    "atv": "RETAIL_AUTO",
+    # -- Hardware / DIY / trades -------------------------------------------
+    "hardware": "RETAIL_HARDWARE", "doityourself": "RETAIL_HARDWARE",
+    "tools": "RETAIL_HARDWARE", "paint": "RETAIL_HARDWARE",
+    "trade": "RETAIL_HARDWARE", "building_supplies": "RETAIL_HARDWARE",
+    "electrical": "RETAIL_HARDWARE", "plumber": "RETAIL_HARDWARE",
+    "fireplace": "RETAIL_HARDWARE", "energy": "RETAIL_HARDWARE",
+    # -- Electronics --------------------------------------------------------
+    "electronics": "RETAIL_ELECTRONICS", "mobile_phone": "RETAIL_ELECTRONICS",
+    "computer": "RETAIL_ELECTRONICS", "hifi": "RETAIL_ELECTRONICS",
+    "camera": "RETAIL_ELECTRONICS", "appliance": "RETAIL_ELECTRONICS",
+    "video_games": "RETAIL_ELECTRONICS", "video": "RETAIL_ELECTRONICS",
+    "radiotechnics": "RETAIL_ELECTRONICS", "telecommunication": "RETAIL_ELECTRONICS",
+    # -- Home goods & furniture --------------------------------------------
+    "furniture": "RETAIL_HOME", "kitchen": "RETAIL_HOME",
+    "interior_decoration": "RETAIL_HOME", "bathroom_furnishing": "RETAIL_HOME",
+    "bed": "RETAIL_HOME", "curtain": "RETAIL_HOME", "carpet": "RETAIL_HOME",
+    "lighting": "RETAIL_HOME", "houseware": "RETAIL_HOME",
+    "antiques": "RETAIL_HOME", "frame": "RETAIL_HOME",
+    "storage_rental": "RETAIL_HOME",
+    # -- Culture / media / gifts -------------------------------------------
+    "books": "RETAIL_CULTURE", "music": "RETAIL_CULTURE",
+    "art": "RETAIL_CULTURE", "musical_instrument": "RETAIL_CULTURE",
+    "stationery": "RETAIL_CULTURE", "newsagent": "RETAIL_CULTURE",
+    "craft": "RETAIL_CULTURE", "gift": "RETAIL_CULTURE",
+    "photo": "RETAIL_CULTURE", "antique": "RETAIL_CULTURE",
+    "collector": "RETAIL_CULTURE", "toys": "RETAIL_CULTURE",
+    "games": "RETAIL_CULTURE",
+    # -- Sport / outdoor ----------------------------------------------------
+    "sports": "RETAIL_SPORT", "bicycle": "RETAIL_SPORT",
+    "outdoor": "RETAIL_SPORT", "fishing": "RETAIL_SPORT",
+    "hunting": "RETAIL_SPORT", "scuba_diving": "RETAIL_SPORT",
+    "ski": "RETAIL_SPORT", "golf": "RETAIL_SPORT",
+    "boat": "RETAIL_SPORT", "weapons": "RETAIL_SPORT",
+    # -- Health / beauty products ------------------------------------------
+    "optician": "RETAIL_HEALTH", "medical_supply": "RETAIL_HEALTH",
+    "chemist": "RETAIL_HEALTH", "cosmetics": "RETAIL_HEALTH",
+    "perfumery": "RETAIL_HEALTH", "hearing_aids": "RETAIL_HEALTH",
+    "nutrition_supplements": "RETAIL_HEALTH", "herbalist": "RETAIL_HEALTH",
+    # -- Pets ---------------------------------------------------------------
+    "pet": "RETAIL_PETS", "pet_grooming": "RETAIL_PETS",
+    "pet_supply": "RETAIL_PETS",
+    # -- Florist / garden ---------------------------------------------------
+    "florist": "RETAIL_GARDEN", "garden_centre": "RETAIL_GARDEN",
+    "garden_furniture": "RETAIL_GARDEN", "houseplant": "RETAIL_GARDEN",
 }
 
-# Landuse + natural=water classes.
+# Natural tags on *nodes* become POIs (trees, peaks, springs, etc.).
+# Globally `natural=tree` is by far the largest single tag occurrence
+# in this key (~36% of all natural = ~33M features), so ignoring it
+# leaves a huge amount of urban-greenery / rural-landscape signal on
+# the table.
+NATURAL_POINT_TO_CATEGORY: Dict[str, str] = {
+    "tree": "NATURAL_TREE",
+    "peak": "NATURAL_PEAK",
+    "spring": "NATURAL_SPRING",
+    "cave_entrance": "NATURAL_CAVE",
+    "volcano": "NATURAL_VOLCANO",
+    "saddle": "NATURAL_SADDLE",
+    "sinkhole": "NATURAL_SINKHOLE",
+    "hill": "NATURAL_HILL",
+    "rock": "NATURAL_ROCK",
+    "stone": "NATURAL_STONE",
+    "geyser": "NATURAL_GEYSER",
+}
+
+# Landuse area buckets. The old "PARK catch-all" was 54% of global
+# landuse — informative but coarse. We now split into finer buckets
+# so the model can distinguish e.g. dense forest from mown lawn from
+# a cemetery. Uses TagInfo's top-40 landuse values as reference.
 LANDUSE_TO_CATEGORY: Dict[str, str] = {
-    "park": "PARK", "grass": "PARK", "meadow": "PARK",
-    "forest": "PARK", "orchard": "PARK", "recreation_ground": "PARK",
-    "cemetery": "PARK", "village_green": "PARK", "allotments": "PARK",
-    "garden": "PARK",
+    # Urban green / recreation
+    "park": "PARK", "recreation_ground": "PARK",
+    "village_green": "PARK", "garden": "PARK",
+    "allotments": "PARK", "cemetery": "CEMETERY",
+    # Managed open / mown / pasture
+    "grass": "GRASSLAND", "meadow": "GRASSLAND",
+    # Woodland (trees as a cover, not individual trees)
+    "forest": "FOREST",
+    # Orchards live between farmland and forest — their own bucket
+    "orchard": "ORCHARD",
+    # Built-up
     "residential": "RESIDENTIAL",
     "commercial": "COMMERCIAL", "retail": "COMMERCIAL",
     "industrial": "INDUSTRIAL", "quarry": "INDUSTRIAL",
-    "landfill": "INDUSTRIAL",
-    "farmland": "FARMLAND", "farmyard": "FARMLAND", "vineyard": "FARMLAND",
+    "landfill": "INDUSTRIAL", "port": "INDUSTRIAL",
+    "depot": "INDUSTRIAL",
+    # Primary production
+    "farmland": "FARMLAND", "farmyard": "FARMLAND",
+    "vineyard": "FARMLAND", "aquaculture": "FARMLAND",
+    "plant_nursery": "FARMLAND",
+    # In-progress / empty land
     "construction": "CONSTRUCTION", "brownfield": "CONSTRUCTION",
     "greenfield": "CONSTRUCTION",
+    # Institutional
     "education": "INSTITUTIONAL", "religious": "INSTITUTIONAL",
     "military": "INSTITUTIONAL",
+    # Water-body polygons (the line feature `waterway=*` stays separate)
     "basin": "WATER", "reservoir": "WATER", "pond": "WATER",
+    "salt_pond": "WATER",
 }
-# We also accept natural=wood/scrub as PARK, and natural=water as WATER.
+
+# Natural=* area polygons are split into their own terrain buckets
+# rather than all flattened into PARK. Coastlines / tree_rows / cliffs
+# are *line* features and go through NATURAL_LINE, not this map.
 NATURAL_TO_CATEGORY: Dict[str, str] = {
-    "water": "WATER", "wood": "PARK", "scrub": "PARK",
-    "wetland": "PARK", "heath": "PARK",
+    "water": "WATER",
+    "wood": "FOREST",                 # unmanaged forest
+    "scrub": "SCRUB",
+    "wetland": "WETLAND",
+    "heath": "HEATH",
+    "grassland": "GRASSLAND",
+    "bare_rock": "BARE_ROCK",
+    "scree": "BARE_ROCK",
+    "sand": "SAND",
+    "beach": "SAND",
+    "shingle": "BARE_ROCK",
+    "glacier": "GLACIER",
+    "fell": "HEATH",
+    "mud": "WETLAND",
+    "reef": "WATER",
+    "bay": "WATER",
+    "strait": "WATER",
+}
+
+# Natural=* *line* features — coastlines are the big one, but ridges,
+# cliffs, and tree_rows are all legitimate linear terrain primitives.
+NATURAL_LINE_TO_CATEGORY: Dict[str, str] = {
+    "coastline": "COASTLINE",
+    "tree_row": "TREE_ROW",
+    "cliff": "CLIFF",
+    "ridge": "RIDGE",
+    "arete": "RIDGE",
+    "valley": "VALLEY",
+    "gully": "VALLEY",
+    "earth_bank": "CLIFF",
 }
 
 WATERWAY_TO_CATEGORY: Dict[str, str] = {
@@ -265,14 +409,21 @@ def _bucket_building(tag: Optional[str]) -> str:
     return tag.upper() if tag in BUILDING_CLASSES else "OTHER"
 
 
-def _bucket_poi(amenity: Optional[str], shop: Optional[str]) -> Optional[str]:
-    """Return the POI category token body, or None if neither tag is set."""
+def _bucket_poi(
+    amenity: Optional[str],
+    shop: Optional[str],
+    natural: Optional[str],
+) -> Optional[str]:
+    """Return the POI category token body, or None if no POI-like tag
+    is set. Amenity wins if multiple tags coexist (most common case
+    for node POIs), then shop, then natural.
+    """
     if amenity:
-        key = amenity.lower()
-        return AMENITY_TO_CATEGORY.get(key, "OTHER_AMENITY")
+        return AMENITY_TO_CATEGORY.get(amenity.lower(), "OTHER_AMENITY")
     if shop:
-        key = shop.lower()
-        return SHOP_TO_CATEGORY.get(key, "RETAIL")
+        return SHOP_TO_CATEGORY.get(shop.lower(), "RETAIL")
+    if natural:
+        return NATURAL_POINT_TO_CATEGORY.get(natural.lower())
     return None
 
 
@@ -282,6 +433,16 @@ def _bucket_landuse(landuse: Optional[str], natural: Optional[str]) -> Optional[
     if natural:
         return NATURAL_TO_CATEGORY.get(natural.lower())
     return None
+
+
+def _bucket_natural_line(tag: Optional[str]) -> Optional[str]:
+    """Bucket a natural=* value that appears on a way. Returns None if
+    the value is not a recognised linear natural feature (so callers
+    fall through to other tag checks).
+    """
+    if not tag:
+        return None
+    return NATURAL_LINE_TO_CATEGORY.get(tag.lower())
 
 
 def _bucket_waterway(tag: Optional[str]) -> str:
@@ -590,13 +751,14 @@ class _OSMCollector(osmium.SimpleHandler):
     attributes (levels/speed/surface) are retained as raw strings and
     bucketed downstream.
 
-    Buckets:
-        * nodes (amenity / shop)           -> pois
-        * ways  (highway)                  -> roads
-        * ways  (waterway)                 -> waterways
-        * ways  (railway)                  -> railways
-        * areas (building)                 -> buildings
-        * areas (landuse | natural=water)  -> landuses
+    Feature routing:
+        * nodes (amenity / shop / natural-point)   -> pois
+        * ways  (highway)                          -> roads
+        * ways  (waterway)                         -> waterways
+        * ways  (railway)                          -> railways
+        * ways  (natural=coastline/cliff/tree_row) -> natural_lines
+        * areas (building)                         -> buildings
+        * areas (landuse | natural=<area>)         -> landuses
     """
 
     def __init__(self) -> None:
@@ -607,6 +769,8 @@ class _OSMCollector(osmium.SimpleHandler):
         self.roads: List[Tuple[BaseGeometry, str, Optional[str], Optional[str]]] = []
         self.waterways: List[Tuple[BaseGeometry, str]] = []
         self.railways: List[Tuple[BaseGeometry, str]] = []
+        # New: linear natural features (coastline, cliff, tree_row, ridge)
+        self.natural_lines: List[Tuple[BaseGeometry, str]] = []
         # (geom, building_tag, building_levels_raw)
         self.buildings: List[Tuple[BaseGeometry, str, Optional[str]]] = []
         # (geom, landuse_bucket_key)
@@ -622,9 +786,10 @@ class _OSMCollector(osmium.SimpleHandler):
         tags = n.tags
         amenity = tags.get("amenity")
         shop = tags.get("shop")
-        if amenity is None and shop is None:
+        natural = tags.get("natural")
+        if amenity is None and shop is None and natural is None:
             return
-        category = _bucket_poi(amenity, shop)
+        category = _bucket_poi(amenity, shop, natural)
         if category is None:
             return
         try:
@@ -642,7 +807,10 @@ class _OSMCollector(osmium.SimpleHandler):
         hw = tags.get("highway")
         ww = tags.get("waterway")
         rw = tags.get("railway")
-        if hw is None and ww is None and rw is None:
+        nat = tags.get("natural")
+        nat_line_cat = _bucket_natural_line(nat) if nat else None
+
+        if hw is None and ww is None and rw is None and nat_line_cat is None:
             return
         try:
             wkb_hex = self._wkbf.create_linestring(w)
@@ -650,7 +818,8 @@ class _OSMCollector(osmium.SimpleHandler):
             self._n_way_fail += 1
             return
         geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
-        # Highway wins if both keys somehow set (rare).
+
+        # Highway wins if multiple keys coexist (very rare but possible).
         if hw is not None:
             self.roads.append(
                 (geom, hw, tags.get("maxspeed"), tags.get("surface"))
@@ -659,6 +828,8 @@ class _OSMCollector(osmium.SimpleHandler):
             self.waterways.append((geom, ww))
         elif rw is not None:
             self.railways.append((geom, rw))
+        elif nat_line_cat is not None:
+            self.natural_lines.append((geom, nat_line_cat))
 
     # -- area ---------------------------------------------------------------
 
@@ -669,7 +840,7 @@ class _OSMCollector(osmium.SimpleHandler):
         natural = tags.get("natural")
 
         want_building = building is not None
-        want_landuse = (landuse is not None) or (natural == "water") or (natural in NATURAL_TO_CATEGORY)
+        want_landuse = (landuse is not None) or (natural is not None and natural.lower() in NATURAL_TO_CATEGORY)
 
         if not want_building and not want_landuse:
             return
@@ -697,13 +868,14 @@ def load_pbf(pbf_path: str) -> _OSMCollector:
     handler = _OSMCollector()
     handler.apply_file(pbf_path, locations=True, idx="flex_mem")
     logger.info(
-        "loaded: %d buildings, %d roads, %d pois, %d landuses, %d waterways, %d railways",
+        "loaded: %d buildings, %d roads, %d pois, %d landuses, %d waterways, %d railways, %d natural_lines",
         len(handler.buildings),
         len(handler.roads),
         len(handler.pois),
         len(handler.landuses),
         len(handler.waterways),
         len(handler.railways),
+        len(handler.natural_lines),
     )
     logger.info(
         "skipped (bad geometry): %d nodes, %d ways, %d areas",
@@ -801,6 +973,17 @@ def build_raw_objects(collector: _OSMCollector) -> List[_RawObject]:
             geom=g,
             kind="RAILWAY",
             tag_token=f"<TAG_{_bucket_railway(tag)}>",
+        ))
+
+    logger.info("simplifying %d natural lines", len(collector.natural_lines))
+    for geom, bucket in collector.natural_lines:
+        g = _simplify(geom)
+        if g is None:
+            continue
+        out.append(_RawObject(
+            geom=g,
+            kind="NATURAL_LINE",
+            tag_token=f"<TAG_{bucket}>",
         ))
 
     logger.info("total raw objects: %d", len(out))

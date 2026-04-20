@@ -53,7 +53,7 @@ logger = logging.getLogger("validate_stockholm")
 # Configuration
 # ---------------------------------------------------------------------------
 
-KINDS = ["BUILDING", "ROAD", "POI", "LANDUSE", "WATERWAY", "RAILWAY"]
+KINDS = ["BUILDING", "ROAD", "POI", "LANDUSE", "WATERWAY", "RAILWAY", "NATURAL_LINE"]
 
 # Must match tokenizer's COMPASS_BUCKETS orientation exactly.
 DIR_UNIT_VECTORS: Dict[str, Tuple[float, float]] = {
@@ -400,7 +400,7 @@ def check_geometry(
     coherence per kind.
     """
     out: Dict[str, dict] = {}
-    for kind in ("BUILDING", "LANDUSE", "ROAD", "WATERWAY", "RAILWAY"):
+    for kind in ("BUILDING", "LANDUSE", "ROAD", "WATERWAY", "RAILWAY", "NATURAL_LINE"):
         parsed = [p for p in parsed_by_kind[kind]["parsed"] if p.get("valid")]
         if not parsed:
             out[kind] = {"n": 0}
