@@ -62,6 +62,9 @@ mkdir -p "${OUT_DIR}"
 python "${SCRIPT_DIR}/tokenize_stockholm.py" \
   --input  "${DATA_PBF}" \
   --output-dir "${OUT_DIR}" \
+  --region EUROPE \
+  --climate TEMPERATE \
+  --density URBAN \
   --log-level INFO
 
 echo "[slurm] end: $(date -u +%FT%TZ)"

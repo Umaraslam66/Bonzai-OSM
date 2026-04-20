@@ -55,22 +55,14 @@ logger = logging.getLogger("validate_stockholm")
 
 KINDS = ["BUILDING", "ROAD", "POI", "LANDUSE", "WATERWAY", "RAILWAY", "NATURAL_LINE"]
 
-# Must match tokenizer's COMPASS_BUCKETS orientation exactly.
-DIR_UNIT_VECTORS: Dict[str, Tuple[float, float]] = {
-    "E":  ( 1.0,  0.0),
-    "NE": ( math.sqrt(0.5),  math.sqrt(0.5)),
-    "N":  ( 0.0,  1.0),
-    "NW": (-math.sqrt(0.5),  math.sqrt(0.5)),
-    "W":  (-1.0,  0.0),
-    "SW": (-math.sqrt(0.5), -math.sqrt(0.5)),
-    "S":  ( 0.0, -1.0),
-    "SE": ( math.sqrt(0.5), -math.sqrt(0.5)),
-}
-
-MOVE_RE = re.compile(r"^<MOVE_([A-Z]+)_(\d+)M>$")
+DELTA_RE = re.compile(r"^<(dx|dy)_(-?\d+)>$")
 ANCHOR_RE = re.compile(r"^<([XY])_(\d+)>$")
 TAG_RE = re.compile(r"^<TAG_[A-Z0-9_]+>$")
-EXTRA_PREFIXES = ("<LEVELS_", "<SPEED_", "<SURFACE_")
+# All attribute families that may appear between TAG and the first X anchor.
+EXTRA_PREFIXES = (
+    "<LEVELS_", "<SPEED_", "<SURFACE_", "<LIT_", "<LANES_",
+    "<ACCESS_", "<ONEWAY_", "<BRIDGE_", "<TUNNEL_", "<HEIGHT_",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -199,33 +191,41 @@ def parse_sequence(tokens: List[str], kind: str) -> dict:
     iy = int(m.group(2))
     i += 1
 
-    moves: List[Tuple[str, int]] = []
+    # Geometry now comes as (dx, dy) token PAIRS. Store deltas as
+    # (dx_int, dy_int) tuples so downstream decoders can replay them.
+    deltas: List[Tuple[int, int]] = []
     n_parts = 1
     while i < len(tokens) - 1:
         tok = tokens[i]
         if tok == "<PART_SEP>":
             n_parts += 1
             i += 1
-            # after PART_SEP we expect X, Y again (for multi-ring)
+            # After PART_SEP we expect X, Y again for a new ring.
             if i + 1 < len(tokens) and ANCHOR_RE.match(tokens[i]) and ANCHOR_RE.match(tokens[i + 1]):
                 i += 2
             continue
-        mv = MOVE_RE.match(tok)
-        if mv:
-            moves.append((mv.group(1), int(mv.group(2))))
-            i += 1
+        mx = DELTA_RE.match(tok)
+        if mx and mx.group(1) == "dx":
+            # dx must be followed by a dy.
+            if i + 1 >= len(tokens):
+                return {"valid": False, "reason": "dx_without_dy"}
+            my = DELTA_RE.match(tokens[i + 1])
+            if not my or my.group(1) != "dy":
+                return {"valid": False, "reason": f"dx_not_followed_by_dy:{tokens[i+1]}"}
+            deltas.append((int(mx.group(2)), int(my.group(2))))
+            i += 2
             continue
         return {"valid": False, "reason": f"unexpected_token:{tok}"}
 
-    if kind == "POI" and moves:
-        return {"valid": False, "reason": "poi_has_moves"}
+    if kind == "POI" and deltas:
+        return {"valid": False, "reason": "poi_has_geometry"}
 
     return {
         "valid": True,
         "tag": tag,
         "extras": extras,
         "anchor": (ix, iy),
-        "moves": moves,
+        "deltas": deltas,
         "n_parts": n_parts,
         "n_tokens": len(tokens),
     }
@@ -343,15 +343,16 @@ def normalise(counts: Counter) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def decode_moves(moves: List[Tuple[str, int]]) -> np.ndarray:
-    """Convert a list of (direction, meters) into (N+1, 2) path
-    coordinates in meters, starting at origin.
+def decode_moves(deltas: List[Tuple[int, int]]) -> np.ndarray:
+    """Convert a list of (dx_m, dy_m) pairs into (N+1, 2) path
+    coordinates in meters, starting at origin. Multiple consecutive
+    dx/dy pairs that target the same vertex (split across the 32 m cap)
+    simply accumulate naturally by construction.
     """
     pts = [(0.0, 0.0)]
-    for direction, meters in moves:
-        ux, uy = DIR_UNIT_VECTORS[direction]
+    for dx, dy in deltas:
         px, py = pts[-1]
-        pts.append((px + ux * meters, py + uy * meters))
+        pts.append((px + float(dx), py + float(dy)))
     return np.array(pts, dtype=np.float64)
 
 
@@ -405,7 +406,7 @@ def check_geometry(
         if not parsed:
             out[kind] = {"n": 0}
             continue
-        paths = [decode_moves(p["moves"]) for p in parsed if p["moves"]]
+        paths = [decode_moves(p["deltas"]) for p in parsed if p["deltas"]]
         # For area/closure we only care about polygons (BUILDING / LANDUSE).
         if kind in ("BUILDING", "LANDUSE"):
             metrics = [_polygon_metrics(p) for p in paths if len(p) >= 4]
@@ -467,9 +468,9 @@ def render_samples(
         ax = axes[row, 0]
         ax.set_title(f"{kind} — {per_kind} generated samples")
         parsed = [p for p in parsed_by_kind.get(kind, {}).get("parsed", []) if p.get("valid")]
-        parsed = [p for p in parsed if p["moves"]][:per_kind]
+        parsed = [p for p in parsed if p["deltas"]][:per_kind]
         for idx, p in enumerate(parsed):
-            path = decode_moves(p["moves"])
+            path = decode_moves(p["deltas"])
             # Tile horizontally so they don't overlap.
             shift = idx * 120.0
             ax.plot(path[:, 0] + shift, path[:, 1], linewidth=1.0)

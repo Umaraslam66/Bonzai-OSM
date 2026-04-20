@@ -2,60 +2,27 @@
 tokenize_stockholm.py
 =====================
 
-Stockholm PoC — convert a BBBike `.osm.pbf` extract into a 1D stream of
-"spatial tokens" that an autoregressive Transformer can ingest.
+Stockholm PoC / global pipeline — convert a `.osm.pbf` extract into a
+1D stream of Spatial-Foundation-Model tokens.
 
-Pipeline
---------
-1. Parse PBF with `pyosmium`. Keep:
-     * `building=*`    (multipolygons)  with optional `building:levels`
-     * `highway=*`     (lines)          with optional `maxspeed`, `surface`
-     * `amenity=*` / `shop=*`    on nodes     -> POI points
-     * `waterway=*`    (lines)
-     * `railway=*`     (lines)
-     * `landuse=*` and `natural=water` (multipolygons) -> LANDUSE
-2. Simplify polylines/polygons with Ramer-Douglas-Peucker
-   (`shapely.simplify`, preserve_topology=False).
-3. Compute the chunk bounding box from all surviving geometries, then
-   for every geometry:
-      anchor  = (ix, iy) on a chunk-local GRID_SIZE x GRID_SIZE grid,
-                encoded as two tokens `<X_ix>` and `<Y_iy>`.
-      moves   = sequence of (direction_bucket, distance_bucket_m) tokens
-                between consecutive simplified vertices, projected to
-                local meters via an equirectangular approximation.
-      extras  = optional attribute tokens injected between the class tag
-                and the anchor — LEVELS (buildings), SPEED+SURFACE (roads).
-      POIs    = (X, Y) anchor only; no moves, no extras.
-4. Assign a Hilbert-curve key to the centroid of every object using the
-   *same* bounding box as the anchor grid, sort globally, flatten the
-   sorted objects to one big list of string tokens.
-5. Write Apache Parquet, chunked, ready for `datasets` streaming.
-6. Print a vocabulary audit and the final total vocab size.
+Major upgrades vs V2.1:
+  * Geometry uses 1-meter Delta X/Y tokens (`<dx_*>`, `<dy_*>`) in
+    [-32, +32] range, replacing the chunky `<MOVE_DIR_DIST>` pairs.
+  * Tags now carry the OSM key in the token: `<TAG_AMENITY_HOSPITAL>`,
+    `<TAG_SHOP_SUPERMARKET>`, `<TAG_BUILDING_HOUSE>`, ...
+  * Richer attributes: `<SURFACE_ASPHALT>`, `<LIT_YES>`, `<LANES_2>`,
+    `<ACCESS_PRIVATE>`, `<ONEWAY_YES>`, `<BRIDGE_YES>`, `<TUNNEL_YES>`,
+    `<LEVELS_*>`, `<SPEED_*>`, `<HEIGHT_*>`.
+  * New POI / LANDUSE sources: `leisure=*`, `tourism=*`,
+    `public_transport=*`, `historic=*` alongside amenity/shop/natural.
+  * New kind: `NATURAL_LINE` for coastlines/cliffs/tree_rows/ridges.
+  * Macro-context prefix row (`<CONTEXT_START> <REGION_*> <CLIMATE_*>
+    <DENSITY_*> <CONTEXT_END>`) injected at the start of the corpus so
+    the model knows where / what it's drawing.
 
-"Semantic compression" bucketing
---------------------------------
-All free-form tag values are mapped onto small, fixed vocabularies
-before token generation so global vocabulary stays bounded:
-  * POIs     : ~20 categories across amenity + shop values
-  * Landuse  : 9 categories (park, water, residential, …)
-  * Waterway : 5 (river, stream, canal, drain, other)
-  * Railway  : 5 (rail, tram, subway, narrow_gauge, other)
-  * Levels   : 4 buckets (1-2, 3-5, 6-10, 11+)
-  * Speed    : 3 buckets (low <40, mid 40-70, high >70 kph)
-  * Surface  : 2 buckets (paved, unpaved)
-
-Design notes
-------------
-- We intentionally avoid geopandas for portability. Geometries come out
-  of pyosmium as WKB hex; we hydrate them with shapely directly.
-- Long edges are split across multiple MOVE tokens: we snap the distance
-  to the largest-fitting bucket in a log-ish ladder and emit N tokens
-  for anything that overshoots. This bounds the per-token distance so
-  the model sees a stable unit of motion.
-- The Hilbert key uses a 21-bit-per-axis encoding (~1 m resolution at
-  Stockholm latitudes). Hilbert preserves 2D locality better than the
-  older Z-order key — adjacent Hilbert positions are always spatial
-  neighbours, which is what we want for the autoregressive stream.
+All vocabulary definitions live in `vocab_spec.py`; this file only
+implements the *emission* logic. Run `generate_vocab_dict.py` to
+produce `vocab_dictionary.md` from the spec.
 """
 
 from __future__ import annotations
@@ -79,6 +46,8 @@ from shapely import wkb as shp_wkb
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
+import vocab_spec as VS
+
 try:
     import osmium
     import osmium.geom
@@ -90,470 +59,275 @@ except ImportError as exc:  # pragma: no cover
 # Configuration
 # ---------------------------------------------------------------------------
 
-GRID_SIZE = 256
-
-SIMPLIFY_TOLERANCE_DEG = 1e-5
-
-COMPASS_BUCKETS = [
-    (0.0, "E"),
-    (45.0, "NE"),
-    (90.0, "N"),
-    (135.0, "NW"),
-    (180.0, "W"),
-    (-135.0, "SW"),
-    (-90.0, "S"),
-    (-45.0, "SE"),
-]
-
-DISTANCE_BUCKETS_M = [1000, 500, 250, 100, 50, 25, 15, 10, 5]
-
-CHUNK_SIZE = 10_000
+SIMPLIFY_TOLERANCE_DEG = 1e-5      # ~1.1 m at Stockholm latitudes
+CHUNK_SIZE = 10_000                # parquet row-group size
+BBOX_PERCENTILE_LOW = 0.5
+BBOX_PERCENTILE_HIGH = 99.5
 
 logger = logging.getLogger("tokenize_stockholm")
 
 
 # ---------------------------------------------------------------------------
-# Tag / attribute bucketing
+# Small utilities
 # ---------------------------------------------------------------------------
 
-HIGHWAY_CLASSES = {
-    "motorway", "trunk", "primary", "secondary", "tertiary",
-    "unclassified", "residential", "service", "living_street",
-    "pedestrian", "track", "path", "footway", "cycleway", "steps",
-}
-BUILDING_CLASSES = {
-    "yes", "residential", "house", "apartments", "detached",
-    "commercial", "retail", "industrial", "office", "warehouse",
-    "school", "church", "hospital", "garage", "hut", "shed",
-    "public", "civic",
-    # Long-tail but distinctive globally (from TagInfo top-20):
-    "roof", "cabin", "greenhouse", "barn", "service",
-    "hangar", "stadium", "farm_auxiliary", "kindergarten",
-    "university", "college",
+
+_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+
+def _sanitize(value: str) -> str:
+    v = _SANITIZE_RE.sub("_", value.strip()).strip("_")
+    return v.upper() if v else "OTHER"
+
+
+def _to_lower(v) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, bytes):
+        v = v.decode("utf-8", errors="replace")
+    v = str(v).strip()
+    return v.lower() if v else None
+
+
+# ---------------------------------------------------------------------------
+# Tag-token helpers (TAG_KEY_VALUE with bucketing)
+# ---------------------------------------------------------------------------
+
+
+# Pre-flattened sets for O(1) lookups per key.
+_TAG_ALLOWED_SETS: Dict[str, set] = {
+    k: set(vs) for k, vs in VS.TAG_ALLOWED_VALUES.items()
 }
 
-# POI categories — ~20 broad buckets over amenity=* / shop=* values.
-# Every unknown amenity falls through to OTHER_AMENITY; every unknown
-# shop falls through to RETAIL (since shop=* is already retail by
-# definition). `name=*` is explicitly *not* read.
-AMENITY_TO_CATEGORY: Dict[str, str] = {
-    # FOOD_BEVERAGE
-    "cafe": "FOOD_BEVERAGE", "restaurant": "FOOD_BEVERAGE",
-    "fast_food": "FOOD_BEVERAGE", "bar": "FOOD_BEVERAGE",
-    "pub": "FOOD_BEVERAGE", "ice_cream": "FOOD_BEVERAGE",
-    "biergarten": "FOOD_BEVERAGE", "food_court": "FOOD_BEVERAGE",
-    # EDUCATION
-    "school": "EDUCATION", "kindergarten": "EDUCATION",
-    "university": "EDUCATION", "college": "EDUCATION",
-    "library": "EDUCATION", "language_school": "EDUCATION",
-    "music_school": "EDUCATION", "driving_school": "EDUCATION",
-    # HEALTHCARE
-    "hospital": "HEALTHCARE", "clinic": "HEALTHCARE",
-    "pharmacy": "HEALTHCARE", "doctors": "HEALTHCARE",
-    "dentist": "HEALTHCARE", "veterinary": "HEALTHCARE",
-    # FINANCIAL
-    "bank": "FINANCIAL", "atm": "FINANCIAL", "bureau_de_change": "FINANCIAL",
-    # CIVIC
-    "townhall": "CIVIC", "courthouse": "CIVIC", "post_office": "CIVIC",
-    "embassy": "CIVIC", "public_building": "CIVIC",
-    # SAFETY
-    "police": "SAFETY", "fire_station": "SAFETY", "prison": "SAFETY",
-    # ENTERTAINMENT
-    "cinema": "ENTERTAINMENT", "theatre": "ENTERTAINMENT",
-    "nightclub": "ENTERTAINMENT", "arts_centre": "ENTERTAINMENT",
-    "casino": "ENTERTAINMENT", "community_centre": "ENTERTAINMENT",
-    "events_venue": "ENTERTAINMENT",
-    # WORSHIP
-    "place_of_worship": "WORSHIP", "grave_yard": "WORSHIP",
-    # ACCOMMODATION (amenity-side; tourism=hotel lives under tourism=*)
-    "hotel": "ACCOMMODATION", "hostel": "ACCOMMODATION",
-    "guest_house": "ACCOMMODATION", "motel": "ACCOMMODATION",
-    # TRANSPORT (non-parking)
-    "bus_station": "TRANSPORT", "taxi": "TRANSPORT",
-    "ferry_terminal": "TRANSPORT", "bicycle_rental": "TRANSPORT",
-    # PARKING
-    "parking": "PARKING", "bicycle_parking": "PARKING",
-    "motorcycle_parking": "PARKING", "parking_entrance": "PARKING",
-    "parking_space": "PARKING",
-    # FUEL
-    "fuel": "FUEL", "charging_station": "FUEL",
-    # AUTOMOTIVE
-    "car_rental": "AUTOMOTIVE", "car_wash": "AUTOMOTIVE",
-    "car_sharing": "AUTOMOTIVE",
-    # PUBLIC_AMENITY (benches, bins, info, etc. — low-signal but common)
-    "bench": "PUBLIC_AMENITY", "drinking_water": "PUBLIC_AMENITY",
-    "toilets": "PUBLIC_AMENITY", "waste_basket": "PUBLIC_AMENITY",
-    "waste_disposal": "PUBLIC_AMENITY", "recycling": "PUBLIC_AMENITY",
-    "shelter": "PUBLIC_AMENITY", "post_box": "PUBLIC_AMENITY",
-    "telephone": "PUBLIC_AMENITY", "clock": "PUBLIC_AMENITY",
-    "bbq": "PUBLIC_AMENITY", "fountain": "PUBLIC_AMENITY",
-    "hunting_stand": "PUBLIC_AMENITY", "vending_machine": "PUBLIC_AMENITY",
-    # RECREATION
-    "playground": "RECREATION", "swimming_pool": "RECREATION",
-    "sports_centre": "RECREATION", "fitness_centre": "RECREATION",
-    "gym": "RECREATION",
-}
 
-# Shop values split into ~13 sub-categories. Every shop=* value on the
-# OSM planet lands in exactly one of these; unknown values fall through
-# to plain RETAIL. The categories were chosen from TagInfo's top-500
-# shop values so they actually cover real-world distribution, not
-# guesses.
-SHOP_TO_CATEGORY: Dict[str, str] = {
-    # -- Groceries & food ---------------------------------------------------
-    "supermarket": "RETAIL_GROCERY", "convenience": "RETAIL_GROCERY",
-    "bakery": "RETAIL_GROCERY", "butcher": "RETAIL_GROCERY",
-    "greengrocer": "RETAIL_GROCERY", "alcohol": "RETAIL_GROCERY",
-    "wine": "RETAIL_GROCERY", "seafood": "RETAIL_GROCERY",
-    "cheese": "RETAIL_GROCERY", "deli": "RETAIL_GROCERY",
-    "farm": "RETAIL_GROCERY", "dairy": "RETAIL_GROCERY",
-    "chocolate": "RETAIL_GROCERY", "confectionery": "RETAIL_GROCERY",
-    "coffee": "RETAIL_GROCERY", "tea": "RETAIL_GROCERY",
-    "pastry": "RETAIL_GROCERY", "frozen_food": "RETAIL_GROCERY",
-    "health_food": "RETAIL_GROCERY", "spices": "RETAIL_GROCERY",
-    "organic": "RETAIL_GROCERY", "beverages": "RETAIL_GROCERY",
-    # -- Clothing & accessories --------------------------------------------
-    "clothes": "RETAIL_FASHION", "shoes": "RETAIL_FASHION",
-    "jewelry": "RETAIL_FASHION", "bag": "RETAIL_FASHION",
-    "fashion_accessories": "RETAIL_FASHION", "watches": "RETAIL_FASHION",
-    "leather": "RETAIL_FASHION", "tailor": "RETAIL_FASHION",
-    "boutique": "RETAIL_FASHION", "fabric": "RETAIL_FASHION",
-    # -- Personal services (trade-services & body-care) --------------------
-    "hairdresser": "RETAIL_SERVICES", "beauty": "RETAIL_SERVICES",
-    "laundry": "RETAIL_SERVICES", "dry_cleaning": "RETAIL_SERVICES",
-    "massage": "RETAIL_SERVICES", "tattoo": "RETAIL_SERVICES",
-    "travel_agency": "RETAIL_SERVICES", "nails": "RETAIL_SERVICES",
-    "shoe_repair": "RETAIL_SERVICES", "funeral_directors": "RETAIL_SERVICES",
-    "copyshop": "RETAIL_SERVICES", "pawnbroker": "RETAIL_SERVICES",
-    "locksmith": "RETAIL_SERVICES",
-    # -- Automotive ---------------------------------------------------------
-    "car_repair": "RETAIL_AUTO", "car": "RETAIL_AUTO",
-    "motorcycle": "RETAIL_AUTO", "motorcycle_repair": "RETAIL_AUTO",
-    "car_parts": "RETAIL_AUTO", "tyres": "RETAIL_AUTO",
-    "truck": "RETAIL_AUTO", "trailer": "RETAIL_AUTO",
-    "atv": "RETAIL_AUTO",
-    # -- Hardware / DIY / trades -------------------------------------------
-    "hardware": "RETAIL_HARDWARE", "doityourself": "RETAIL_HARDWARE",
-    "tools": "RETAIL_HARDWARE", "paint": "RETAIL_HARDWARE",
-    "trade": "RETAIL_HARDWARE", "building_supplies": "RETAIL_HARDWARE",
-    "electrical": "RETAIL_HARDWARE", "plumber": "RETAIL_HARDWARE",
-    "fireplace": "RETAIL_HARDWARE", "energy": "RETAIL_HARDWARE",
-    # -- Electronics --------------------------------------------------------
-    "electronics": "RETAIL_ELECTRONICS", "mobile_phone": "RETAIL_ELECTRONICS",
-    "computer": "RETAIL_ELECTRONICS", "hifi": "RETAIL_ELECTRONICS",
-    "camera": "RETAIL_ELECTRONICS", "appliance": "RETAIL_ELECTRONICS",
-    "video_games": "RETAIL_ELECTRONICS", "video": "RETAIL_ELECTRONICS",
-    "radiotechnics": "RETAIL_ELECTRONICS", "telecommunication": "RETAIL_ELECTRONICS",
-    # -- Home goods & furniture --------------------------------------------
-    "furniture": "RETAIL_HOME", "kitchen": "RETAIL_HOME",
-    "interior_decoration": "RETAIL_HOME", "bathroom_furnishing": "RETAIL_HOME",
-    "bed": "RETAIL_HOME", "curtain": "RETAIL_HOME", "carpet": "RETAIL_HOME",
-    "lighting": "RETAIL_HOME", "houseware": "RETAIL_HOME",
-    "antiques": "RETAIL_HOME", "frame": "RETAIL_HOME",
-    "storage_rental": "RETAIL_HOME",
-    # -- Culture / media / gifts -------------------------------------------
-    "books": "RETAIL_CULTURE", "music": "RETAIL_CULTURE",
-    "art": "RETAIL_CULTURE", "musical_instrument": "RETAIL_CULTURE",
-    "stationery": "RETAIL_CULTURE", "newsagent": "RETAIL_CULTURE",
-    "craft": "RETAIL_CULTURE", "gift": "RETAIL_CULTURE",
-    "photo": "RETAIL_CULTURE", "antique": "RETAIL_CULTURE",
-    "collector": "RETAIL_CULTURE", "toys": "RETAIL_CULTURE",
-    "games": "RETAIL_CULTURE",
-    # -- Sport / outdoor ----------------------------------------------------
-    "sports": "RETAIL_SPORT", "bicycle": "RETAIL_SPORT",
-    "outdoor": "RETAIL_SPORT", "fishing": "RETAIL_SPORT",
-    "hunting": "RETAIL_SPORT", "scuba_diving": "RETAIL_SPORT",
-    "ski": "RETAIL_SPORT", "golf": "RETAIL_SPORT",
-    "boat": "RETAIL_SPORT", "weapons": "RETAIL_SPORT",
-    # -- Health / beauty products ------------------------------------------
-    "optician": "RETAIL_HEALTH", "medical_supply": "RETAIL_HEALTH",
-    "chemist": "RETAIL_HEALTH", "cosmetics": "RETAIL_HEALTH",
-    "perfumery": "RETAIL_HEALTH", "hearing_aids": "RETAIL_HEALTH",
-    "nutrition_supplements": "RETAIL_HEALTH", "herbalist": "RETAIL_HEALTH",
-    # -- Pets ---------------------------------------------------------------
-    "pet": "RETAIL_PETS", "pet_grooming": "RETAIL_PETS",
-    "pet_supply": "RETAIL_PETS",
-    # -- Florist / garden ---------------------------------------------------
-    "florist": "RETAIL_GARDEN", "garden_centre": "RETAIL_GARDEN",
-    "garden_furniture": "RETAIL_GARDEN", "houseplant": "RETAIL_GARDEN",
-}
+def tag_token(key: str, value: Optional[str]) -> str:
+    """Map (key, raw_value) to `<TAG_KEY_VALUE>` or `<TAG_KEY_OTHER>`.
 
-# Natural tags on *nodes* become POIs (trees, peaks, springs, etc.).
-# Globally `natural=tree` is by far the largest single tag occurrence
-# in this key (~36% of all natural = ~33M features), so ignoring it
-# leaves a huge amount of urban-greenery / rural-landscape signal on
-# the table.
-NATURAL_POINT_TO_CATEGORY: Dict[str, str] = {
-    "tree": "NATURAL_TREE",
-    "peak": "NATURAL_PEAK",
-    "spring": "NATURAL_SPRING",
-    "cave_entrance": "NATURAL_CAVE",
-    "volcano": "NATURAL_VOLCANO",
-    "saddle": "NATURAL_SADDLE",
-    "sinkhole": "NATURAL_SINKHOLE",
-    "hill": "NATURAL_HILL",
-    "rock": "NATURAL_ROCK",
-    "stone": "NATURAL_STONE",
-    "geyser": "NATURAL_GEYSER",
-}
+    Unknown values fall through to OTHER. Raw value is lower-cased
+    before lookup so `Hospital` and `hospital` collide correctly.
+    """
+    key_upper = key.upper()
+    v = _to_lower(value)
+    if v is None:
+        return f"<TAG_{key_upper}_OTHER>"
+    if v in _TAG_ALLOWED_SETS.get(key, set()):
+        return f"<TAG_{key_upper}_{_sanitize(v)}>"
+    return f"<TAG_{key_upper}_OTHER>"
 
-# Landuse area buckets. The old "PARK catch-all" was 54% of global
-# landuse — informative but coarse. We now split into finer buckets
-# so the model can distinguish e.g. dense forest from mown lawn from
-# a cemetery. Uses TagInfo's top-40 landuse values as reference.
-LANDUSE_TO_CATEGORY: Dict[str, str] = {
-    # Urban green / recreation
-    "park": "PARK", "recreation_ground": "PARK",
-    "village_green": "PARK", "garden": "PARK",
-    "allotments": "PARK", "cemetery": "CEMETERY",
-    # Managed open / mown / pasture
-    "grass": "GRASSLAND", "meadow": "GRASSLAND",
-    # Woodland (trees as a cover, not individual trees)
-    "forest": "FOREST",
-    # Orchards live between farmland and forest — their own bucket
-    "orchard": "ORCHARD",
-    # Built-up
-    "residential": "RESIDENTIAL",
-    "commercial": "COMMERCIAL", "retail": "COMMERCIAL",
-    "industrial": "INDUSTRIAL", "quarry": "INDUSTRIAL",
-    "landfill": "INDUSTRIAL", "port": "INDUSTRIAL",
-    "depot": "INDUSTRIAL",
-    # Primary production
-    "farmland": "FARMLAND", "farmyard": "FARMLAND",
-    "vineyard": "FARMLAND", "aquaculture": "FARMLAND",
-    "plant_nursery": "FARMLAND",
-    # In-progress / empty land
-    "construction": "CONSTRUCTION", "brownfield": "CONSTRUCTION",
-    "greenfield": "CONSTRUCTION",
-    # Institutional
-    "education": "INSTITUTIONAL", "religious": "INSTITUTIONAL",
-    "military": "INSTITUTIONAL",
-    # Water-body polygons (the line feature `waterway=*` stays separate)
-    "basin": "WATER", "reservoir": "WATER", "pond": "WATER",
-    "salt_pond": "WATER",
-}
 
-# Natural=* area polygons are split into their own terrain buckets
-# rather than all flattened into PARK. Coastlines / tree_rows / cliffs
-# are *line* features and go through NATURAL_LINE, not this map.
-NATURAL_TO_CATEGORY: Dict[str, str] = {
-    "water": "WATER",
-    "wood": "FOREST",                 # unmanaged forest
-    "scrub": "SCRUB",
-    "wetland": "WETLAND",
-    "heath": "HEATH",
-    "grassland": "GRASSLAND",
-    "bare_rock": "BARE_ROCK",
-    "scree": "BARE_ROCK",
-    "sand": "SAND",
-    "beach": "SAND",
-    "shingle": "BARE_ROCK",
-    "glacier": "GLACIER",
-    "fell": "HEATH",
-    "mud": "WETLAND",
-    "reef": "WATER",
-    "bay": "WATER",
-    "strait": "WATER",
-}
+# ---------------------------------------------------------------------------
+# Attribute bucketing
+# ---------------------------------------------------------------------------
 
-# Natural=* *line* features — coastlines are the big one, but ridges,
-# cliffs, and tree_rows are all legitimate linear terrain primitives.
-NATURAL_LINE_TO_CATEGORY: Dict[str, str] = {
-    "coastline": "COASTLINE",
-    "tree_row": "TREE_ROW",
-    "cliff": "CLIFF",
-    "ridge": "RIDGE",
-    "arete": "RIDGE",
-    "valley": "VALLEY",
-    "gully": "VALLEY",
-    "earth_bank": "CLIFF",
-}
-
-WATERWAY_TO_CATEGORY: Dict[str, str] = {
-    "river": "RIVER", "riverbank": "RIVER",
-    "stream": "STREAM", "tidal_channel": "STREAM",
-    "canal": "CANAL",
-    "drain": "DRAIN", "ditch": "DRAIN",
-}
-RAILWAY_TO_CATEGORY: Dict[str, str] = {
-    "rail": "RAIL",
-    "tram": "TRAM",
-    "subway": "SUBWAY", "light_rail": "SUBWAY",
-    "narrow_gauge": "NARROW_GAUGE", "monorail": "NARROW_GAUGE",
-    "funicular": "NARROW_GAUGE",
-}
-
-PAVED_SURFACES = {
-    "paved", "asphalt", "concrete", "concrete:plates", "concrete:lanes",
-    "paving_stones", "sett", "cobblestone", "metal", "wood_planks",
-}
-UNPAVED_SURFACES = {
-    "unpaved", "gravel", "fine_gravel", "pebblestone", "compacted",
-    "dirt", "ground", "sand", "earth", "grass", "mud", "wood",
-}
 
 _INT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 
-def _bucket_highway(tag: Optional[str]) -> str:
-    if not tag:
-        return "OTHER"
-    tag = tag.lower()
-    return tag.upper() if tag in HIGHWAY_CLASSES else "OTHER"
+def _surface_token(raw: Optional[str]) -> Optional[str]:
+    v = _to_lower(raw)
+    if v is None:
+        return None
+    if v in VS.SURFACE_VALUES:
+        return f"<SURFACE_{v.upper()}>"
+    # Heuristic fold for common synonyms.
+    if v in {"concrete:plates", "concrete:lanes"}:
+        return "<SURFACE_CONCRETE>"
+    if v in {"pebblestone", "fine_gravel"}:
+        return "<SURFACE_GRAVEL>"
+    if v in {"wood_planks"}:
+        return "<SURFACE_WOOD>"
+    return "<SURFACE_OTHER>"
 
 
-def _bucket_building(tag: Optional[str]) -> str:
-    if not tag:
-        return "OTHER"
-    tag = tag.lower()
-    return tag.upper() if tag in BUILDING_CLASSES else "OTHER"
-
-
-def _bucket_poi(
-    amenity: Optional[str],
-    shop: Optional[str],
-    natural: Optional[str],
-) -> Optional[str]:
-    """Return the POI category token body, or None if no POI-like tag
-    is set. Amenity wins if multiple tags coexist (most common case
-    for node POIs), then shop, then natural.
-    """
-    if amenity:
-        return AMENITY_TO_CATEGORY.get(amenity.lower(), "OTHER_AMENITY")
-    if shop:
-        return SHOP_TO_CATEGORY.get(shop.lower(), "RETAIL")
-    if natural:
-        return NATURAL_POINT_TO_CATEGORY.get(natural.lower())
+def _lit_token(raw: Optional[str]) -> Optional[str]:
+    v = _to_lower(raw)
+    if v is None:
+        return None
+    if v in {"yes", "true", "1", "lit"}:
+        return "<LIT_YES>"
+    if v in {"no", "false", "0"}:
+        return "<LIT_NO>"
+    if v in {"24/7", "24_7", "continuous"}:
+        return "<LIT_24_7>"
+    if v == "automatic":
+        return "<LIT_AUTOMATIC>"
+    if v in {"sunset-sunrise", "sunset_sunrise", "dusk-dawn"}:
+        return "<LIT_SUNSET_SUNRISE>"
     return None
 
 
-def _bucket_landuse(landuse: Optional[str], natural: Optional[str]) -> Optional[str]:
-    if landuse:
-        return LANDUSE_TO_CATEGORY.get(landuse.lower(), "OTHER")
-    if natural:
-        return NATURAL_TO_CATEGORY.get(natural.lower())
-    return None
-
-
-def _bucket_natural_line(tag: Optional[str]) -> Optional[str]:
-    """Bucket a natural=* value that appears on a way. Returns None if
-    the value is not a recognised linear natural feature (so callers
-    fall through to other tag checks).
-    """
-    if not tag:
+def _lanes_token(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
         return None
-    return NATURAL_LINE_TO_CATEGORY.get(tag.lower())
-
-
-def _bucket_waterway(tag: Optional[str]) -> str:
-    if not tag:
-        return "OTHER"
-    return WATERWAY_TO_CATEGORY.get(tag.lower(), "OTHER")
-
-
-def _bucket_railway(tag: Optional[str]) -> str:
-    if not tag:
-        return "OTHER"
-    return RAILWAY_TO_CATEGORY.get(tag.lower(), "OTHER")
-
-
-def _bucket_levels(raw: Optional[str]) -> Optional[str]:
-    """Bucket building:levels into 4 tokens."""
-    if not raw:
-        return None
-    match = _INT_RE.search(str(raw))
-    if match is None:
+    m = _INT_RE.search(str(raw))
+    if not m:
         return None
     try:
-        n = int(float(match.group(0)))
+        n = int(float(m.group(0)))
     except ValueError:
         return None
     if n < 1:
         return None
-    if n <= 2:
-        return "<LEVELS_1_2>"
-    if n <= 5:
-        return "<LEVELS_3_5>"
-    if n <= 10:
-        return "<LEVELS_6_10>"
-    return "<LEVELS_11_PLUS>"
+    if n >= 5:
+        return "<LANES_5_PLUS>"
+    return f"<LANES_{n}>"
 
 
-def _bucket_speed(raw: Optional[str]) -> Optional[str]:
-    """Bucket maxspeed into <SPEED_LOW|MID|HIGH>, normalising units."""
-    if not raw:
+def _access_token(raw: Optional[str]) -> Optional[str]:
+    v = _to_lower(raw)
+    if v is None:
         return None
-    raw_str = str(raw).lower()
-    match = _INT_RE.search(raw_str)
-    if match is None:
-        return None
-    try:
-        value = float(match.group(0))
-    except ValueError:
-        return None
-    # Convert mph to kph if the unit is explicit.
-    if "mph" in raw_str:
-        value *= 1.609
-    kph = int(round(value))
-    if kph < 40:
-        return "<SPEED_LOW>"
-    if kph <= 70:
-        return "<SPEED_MID>"
-    return "<SPEED_HIGH>"
+    if v in VS.ACCESS_VALUES:
+        return f"<ACCESS_{v.upper()}>"
+    return "<ACCESS_OTHER>"
 
 
-def _bucket_surface(raw: Optional[str]) -> Optional[str]:
-    if not raw:
+def _oneway_token(raw: Optional[str]) -> Optional[str]:
+    v = _to_lower(raw)
+    if v is None:
         return None
-    key = str(raw).lower()
-    if key in PAVED_SURFACES:
-        return "<SURFACE_PAVED>"
-    if key in UNPAVED_SURFACES:
-        return "<SURFACE_UNPAVED>"
+    if v in {"yes", "true", "1"}:
+        return "<ONEWAY_YES>"
+    if v in {"no", "false", "0"}:
+        return "<ONEWAY_NO>"
+    if v in {"-1", "reverse"}:
+        return "<ONEWAY_REVERSE>"
     return None
 
 
+def _bridge_token(raw: Optional[str]) -> Optional[str]:
+    v = _to_lower(raw)
+    if v is None:
+        return None
+    return "<BRIDGE_YES>" if v in VS.BRIDGE_TRUTHY else None
+
+
+def _tunnel_token(raw: Optional[str]) -> Optional[str]:
+    v = _to_lower(raw)
+    if v is None:
+        return None
+    return "<TUNNEL_YES>" if v in VS.TUNNEL_TRUTHY else None
+
+
+def _levels_token(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    m = _INT_RE.search(str(raw))
+    if not m:
+        return None
+    try:
+        n = int(float(m.group(0)))
+    except ValueError:
+        return None
+    if n < 1:
+        return None
+    if n <= 2: return "<LEVELS_1_2>"
+    if n <= 5: return "<LEVELS_3_5>"
+    if n <= 10: return "<LEVELS_6_10>"
+    return "<LEVELS_11_PLUS>"
+
+
+def _speed_token(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    s = str(raw).lower()
+    m = _INT_RE.search(s)
+    if not m:
+        return None
+    try:
+        value = float(m.group(0))
+    except ValueError:
+        return None
+    if "mph" in s:
+        value *= 1.609
+    kph = int(round(value))
+    if kph < 40: return "<SPEED_LOW>"
+    if kph <= 70: return "<SPEED_MID>"
+    return "<SPEED_HIGH>"
+
+
+def _height_token(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    m = _INT_RE.search(str(raw))
+    if not m:
+        return None
+    try:
+        meters = float(m.group(0))
+    except ValueError:
+        return None
+    if meters <= 0: return None
+    if meters < 10: return "<HEIGHT_LOW>"
+    if meters < 25: return "<HEIGHT_MID>"
+    if meters < 75: return "<HEIGHT_HIGH>"
+    return "<HEIGHT_TALL>"
+
+
+def road_attribute_tokens(tags) -> List[str]:
+    """Produce ordered attribute tokens for a highway way."""
+    out: List[str] = []
+    # Keep ordering stable for cleaner grammar.
+    for tok in (
+        _surface_token(tags.get("surface")),
+        _lit_token(tags.get("lit")),
+        _lanes_token(tags.get("lanes")),
+        _access_token(tags.get("access")),
+        _oneway_token(tags.get("oneway")),
+        _bridge_token(tags.get("bridge")),
+        _tunnel_token(tags.get("tunnel")),
+        _speed_token(tags.get("maxspeed")),
+    ):
+        if tok is not None:
+            out.append(tok)
+    return out
+
+
+def building_attribute_tokens(tags) -> List[str]:
+    out: List[str] = []
+    for tok in (
+        _levels_token(tags.get("building:levels")),
+        _height_token(tags.get("height")),
+    ):
+        if tok is not None:
+            out.append(tok)
+    return out
+
+
 # ---------------------------------------------------------------------------
-# Geometry helpers
+# Geometry
 # ---------------------------------------------------------------------------
 
 
 def _equirectangular_meters(
     lon_ref: float, lat_ref: float, lon: float, lat: float
 ) -> Tuple[float, float]:
-    """Project (lon, lat) to local meters relative to (lon_ref, lat_ref)."""
     lat_rad = math.radians(lat_ref)
     dx = (lon - lon_ref) * 111_319.49 * math.cos(lat_rad)
     dy = (lat - lat_ref) * 111_319.49
     return dx, dy
 
 
-def _bearing_bucket(dx: float, dy: float) -> str:
-    angle = math.degrees(math.atan2(dy, dx))
-    best = None
-    best_delta = 360.0
-    for center, name in COMPASS_BUCKETS:
-        delta = abs(((angle - center) + 180.0) % 360.0 - 180.0)
-        if delta < best_delta:
-            best_delta = delta
-            best = name
-    assert best is not None
-    return best
+def _split_dxdy(dx_m: float, dy_m: float, cap: int = VS.DELTA_RANGE) -> List[str]:
+    """Split a per-edge meter delta into one or more (dx, dy) token
+    pairs, each constrained to [-cap, +cap] on each axis.
 
-
-def _split_distance(meters: float) -> List[int]:
-    out: List[int] = []
-    remaining = meters
-    smallest = DISTANCE_BUCKETS_M[-1]
-    while remaining >= smallest:
-        for bucket in DISTANCE_BUCKETS_M:
-            if remaining >= bucket:
-                out.append(bucket)
-                remaining -= bucket
-                break
-        else:  # pragma: no cover
-            break
-    return out
+    Zero-magnitude sub-pairs are fine and explicit (emits `<dx_0>`
+    `<dy_N>` and vice-versa) so the model always sees an even number
+    of tokens per edge.
+    """
+    tokens: List[str] = []
+    remaining_x = int(round(dx_m))
+    remaining_y = int(round(dy_m))
+    if remaining_x == 0 and remaining_y == 0:
+        return tokens
+    while remaining_x != 0 or remaining_y != 0:
+        step_x = max(-cap, min(cap, remaining_x))
+        step_y = max(-cap, min(cap, remaining_y))
+        tokens.append(f"<dx_{step_x}>")
+        tokens.append(f"<dy_{step_y}>")
+        remaining_x -= step_x
+        remaining_y -= step_y
+    return tokens
 
 
 def _iter_rings(geom: BaseGeometry) -> Iterator[Sequence[Tuple[float, float]]]:
@@ -574,22 +348,45 @@ def _iter_rings(geom: BaseGeometry) -> Iterator[Sequence[Tuple[float, float]]]:
             yield from _iter_rings(child)
 
 
+def tokenize_ring(
+    coords: Sequence[Tuple[float, float]],
+) -> Tuple[Tuple[float, float], List[str]]:
+    """Return (anchor_lonlat, dxdy_tokens) for one ring.
+
+    Consecutive duplicate vertices are dropped. Edges with magnitude
+    below 1 m are collapsed (still advance the cursor so drift doesn't
+    accumulate).
+    """
+    if not coords:
+        return ((0.0, 0.0), [])
+
+    dedup: List[Tuple[float, float]] = [coords[0]]
+    for pt in coords[1:]:
+        if pt != dedup[-1]:
+            dedup.append(pt)
+
+    lon0, lat0 = dedup[0]
+    delta_tokens: List[str] = []
+    prev_lon, prev_lat = lon0, lat0
+    for lon, lat in dedup[1:]:
+        dx_m, dy_m = _equirectangular_meters(prev_lon, prev_lat, lon, lat)
+        if abs(dx_m) < 0.5 and abs(dy_m) < 0.5:
+            prev_lon, prev_lat = lon, lat
+            continue
+        delta_tokens.extend(_split_dxdy(dx_m, dy_m))
+        prev_lon, prev_lat = lon, lat
+    return ((lon0, lat0), delta_tokens)
+
+
 # ---------------------------------------------------------------------------
-# Hilbert curve encoding for 2D centroid sort
+# Z-order / Hilbert sort (unchanged — Hilbert better preserves 2D locality)
 # ---------------------------------------------------------------------------
 
 
-_HILBERT_BITS = 21  # 2^21 -> ~2M cells per axis, ~1 m at Stockholm latitudes
+_HILBERT_BITS = 21
 
 
 def _hilbert_xy_to_d(n: int, x: int, y: int) -> int:
-    """Convert (x, y) integer coordinates to a Hilbert curve distance.
-
-    `n` must be a power of two. Adapted from the standard reference
-    implementation (Skilling 2004 / Wikipedia's Hilbert curve article).
-    Hilbert preserves locality better than Morton/Z-order: adjacent
-    positions along the curve are always spatial neighbours.
-    """
     d = 0
     s = n // 2
     while s > 0:
@@ -605,11 +402,7 @@ def _hilbert_xy_to_d(n: int, x: int, y: int) -> int:
     return d
 
 
-def hilbert_key(
-    lon: float,
-    lat: float,
-    bounds: Tuple[float, float, float, float],
-) -> int:
+def hilbert_key(lon: float, lat: float, bounds: Tuple[float, float, float, float]) -> int:
     min_lon, min_lat, max_lon, max_lat = bounds
     nx = (lon - min_lon) / max(max_lon - min_lon, 1e-12)
     ny = (lat - min_lat) / max(max_lat - min_lat, 1e-12)
@@ -620,22 +413,41 @@ def hilbert_key(
 
 
 # ---------------------------------------------------------------------------
-# Core per-object tokenization
+# Anchor grid
+# ---------------------------------------------------------------------------
+
+
+def anchor_tokens(
+    lon: float, lat: float,
+    bounds: Tuple[float, float, float, float],
+) -> List[str]:
+    min_lon, min_lat, max_lon, max_lat = bounds
+    nx = (lon - min_lon) / max(max_lon - min_lon, 1e-12)
+    ny = (lat - min_lat) / max(max_lat - min_lat, 1e-12)
+    ix = max(0, min(VS.GRID_SIZE - 1, int(nx * VS.GRID_SIZE)))
+    iy = max(0, min(VS.GRID_SIZE - 1, int(ny * VS.GRID_SIZE)))
+    return [f"<X_{ix}>", f"<Y_{iy}>"]
+
+
+# ---------------------------------------------------------------------------
+# Data classes
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class _RawObject:
-    """Simplified geometry + classification + attribute tokens.
+    """One parsed feature ready for tokenization.
 
-    `extra_tokens` are injected between the <KIND_START>+<TAG_*> header
-    and the first <X_*><Y_*> anchor — so e.g. a building might read
-    [<BUILDING_START>, <TAG_RESIDENTIAL>, <LEVELS_3_5>, <X_42>, <Y_7>, ...].
+    `tag_key` + `tag_value` identify the primary OSM (key, value) of
+    this feature (e.g. `("amenity", "hospital")` or
+    `("building", "yes")`). `extra_tags` carries any extra OSM tags we
+    want to inject as attribute tokens (surface, lit, lanes, ...).
     """
     geom: BaseGeometry
-    kind: str          # BUILDING | ROAD | POI | LANDUSE | WATERWAY | RAILWAY
-    tag_token: str
-    extra_tokens: List[str] = field(default_factory=list)
+    kind: str
+    tag_key: str
+    tag_value: str
+    extra_tags: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -647,70 +459,23 @@ class TokenizedObject:
     centroid_lat: float
 
 
-def anchor_tokens(
-    lon: float,
-    lat: float,
-    bounds: Tuple[float, float, float, float],
-) -> List[str]:
-    """Map an absolute (lon, lat) onto the chunk-local 256x256 grid and
-    return the two-token form `[<X_ix>, <Y_iy>]`.
-    """
-    min_lon, min_lat, max_lon, max_lat = bounds
-    nx = (lon - min_lon) / max(max_lon - min_lon, 1e-12)
-    ny = (lat - min_lat) / max(max_lat - min_lat, 1e-12)
-    ix = max(0, min(GRID_SIZE - 1, int(nx * GRID_SIZE)))
-    iy = max(0, min(GRID_SIZE - 1, int(ny * GRID_SIZE)))
-    return [f"<X_{ix}>", f"<Y_{iy}>"]
-
-
-def tokenize_ring(
-    coords: Sequence[Tuple[float, float]],
-) -> Tuple[Tuple[float, float], List[str]]:
-    if not coords:
-        return ((0.0, 0.0), [])
-
-    dedup: List[Tuple[float, float]] = [coords[0]]
-    for pt in coords[1:]:
-        if pt != dedup[-1]:
-            dedup.append(pt)
-
-    lon0, lat0 = dedup[0]
-
-    move_tokens: List[str] = []
-    prev_lon, prev_lat = lon0, lat0
-    for lon, lat in dedup[1:]:
-        dx, dy = _equirectangular_meters(prev_lon, prev_lat, lon, lat)
-        dist = math.hypot(dx, dy)
-        if dist < DISTANCE_BUCKETS_M[-1]:
-            prev_lon, prev_lat = lon, lat
-            continue
-        bearing = _bearing_bucket(dx, dy)
-        for bucket in _split_distance(dist):
-            move_tokens.append(f"<MOVE_{bearing}_{bucket}M>")
-        prev_lon, prev_lat = lon, lat
-
-    return ((lon0, lat0), move_tokens)
-
-
 def tokenize_row(
     raw: _RawObject,
     bounds: Tuple[float, float, float, float],
 ) -> Optional[TokenizedObject]:
-    """Produce a TokenizedObject from one _RawObject.
+    """Emit the full token stream for a single _RawObject."""
+    tag_tok = tag_token(raw.tag_key, raw.tag_value)
 
-    POIs are point features — no rings, no moves, just anchor.
-    Everything else walks rings and emits MOVE tokens per edge.
-    """
+    # POIs are point features — anchor only, no moves, no parts.
     if raw.kind == "POI":
         if raw.geom is None or raw.geom.is_empty:
             return None
-        tokens: List[str] = [f"<{raw.kind}_START>", raw.tag_token]
-        tokens.extend(raw.extra_tokens)
+        tokens: List[str] = [f"<{raw.kind}_START>", tag_tok]
         tokens.extend(anchor_tokens(raw.geom.x, raw.geom.y, bounds))
         tokens.append(f"<{raw.kind}_END>")
         return TokenizedObject(
             kind=raw.kind,
-            tag_token=raw.tag_token,
+            tag_token=tag_tok,
             tokens=tokens,
             centroid_lon=float(raw.geom.x),
             centroid_lat=float(raw.geom.y),
@@ -720,20 +485,27 @@ def tokenize_row(
     if not rings:
         return None
 
-    tokens = [f"<{raw.kind}_START>", raw.tag_token]
-    tokens.extend(raw.extra_tokens)
+    # Extra attribute tokens (road: surface/lit/lanes/..., building: levels/height)
+    attr_tokens: List[str] = []
+    if raw.kind == "ROAD" and raw.extra_tags:
+        attr_tokens = road_attribute_tokens(raw.extra_tags)
+    elif raw.kind == "BUILDING" and raw.extra_tags:
+        attr_tokens = building_attribute_tokens(raw.extra_tags)
+
+    tokens = [f"<{raw.kind}_START>", tag_tok]
+    tokens.extend(attr_tokens)
     for i, ring in enumerate(rings):
-        (lon0, lat0), moves = tokenize_ring(ring)
+        (lon0, lat0), deltas = tokenize_ring(ring)
         if i > 0:
             tokens.append("<PART_SEP>")
         tokens.extend(anchor_tokens(lon0, lat0, bounds))
-        tokens.extend(moves)
+        tokens.extend(deltas)
     tokens.append(f"<{raw.kind}_END>")
 
     centroid = raw.geom.centroid
     return TokenizedObject(
         kind=raw.kind,
-        tag_token=raw.tag_token,
+        tag_token=tag_tok,
         tokens=tokens,
         centroid_lon=float(centroid.x),
         centroid_lat=float(centroid.y),
@@ -745,36 +517,61 @@ def tokenize_row(
 # ---------------------------------------------------------------------------
 
 
-class _OSMCollector(osmium.SimpleHandler):
-    """pyosmium handler that accumulates every target feature class with
-    its tag attributes. Geometries come out as shapely objects; numeric
-    attributes (levels/speed/surface) are retained as raw strings and
-    bucketed downstream.
+_NATURAL_LINE_SET = set(VS.NATURAL_LINE_VALUES)
+_POI_TAG_KEYS = tuple(VS.POI_TAG_KEYS)
+_LANDUSE_TAG_KEYS = tuple(VS.LANDUSE_TAG_KEYS)
 
-    Feature routing:
-        * nodes (amenity / shop / natural-point)   -> pois
-        * ways  (highway)                          -> roads
-        * ways  (waterway)                         -> waterways
-        * ways  (railway)                          -> railways
-        * ways  (natural=coastline/cliff/tree_row) -> natural_lines
-        * areas (building)                         -> buildings
-        * areas (landuse | natural=<area>)         -> landuses
+
+def _first_poi_tag(tags) -> Optional[Tuple[str, str]]:
+    """Find the first (key, value) among POI-eligible keys. For
+    `natural`, we only accept point-legal values (trees, peaks, etc.),
+    not polygon values like `water` or `wood`.
+    """
+    for key in _POI_TAG_KEYS:
+        v = tags.get(key)
+        if v is None or v == "":
+            continue
+        if key == "natural":
+            vl = v.lower()
+            # Point-legal natural values: excludes area ones like `water`,
+            # `wood`, `wetland`. Those come through the area handler.
+            if vl in _NATURAL_LINE_SET:
+                # coastline/cliff/ridge are lines, not nodes — skip here.
+                continue
+            if vl in {"water", "wood", "scrub", "wetland", "heath",
+                      "grassland", "bare_rock", "sand", "beach",
+                      "shingle", "scree", "fell", "reef", "bay",
+                      "strait", "glacier", "mud"}:
+                continue
+        return (key, v)
+    return None
+
+
+class _OSMCollector(osmium.SimpleHandler):
+    """Streams the PBF once and buckets features into per-kind lists.
+
+    Each entry stores the primary (tag_key, tag_value) so the tokenizer
+    can emit the correctly-keyed TAG token, plus a small dict of
+    per-feature attributes (surface, lanes, levels, ...).
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._wkbf = osmium.geom.WKBFactory()
-        self.pois: List[Tuple[float, float, str]] = []
-        # (geom, highway_tag, maxspeed_raw, surface_raw)
-        self.roads: List[Tuple[BaseGeometry, str, Optional[str], Optional[str]]] = []
+        # POI: (lon, lat, tag_key, tag_value)
+        self.pois: List[Tuple[float, float, str, str]] = []
+        # ROAD: (geom, tag_value, attr_dict)
+        self.roads: List[Tuple[BaseGeometry, str, Dict[str, str]]] = []
+        # WATERWAY: (geom, tag_value)
         self.waterways: List[Tuple[BaseGeometry, str]] = []
+        # RAILWAY: (geom, tag_value)
         self.railways: List[Tuple[BaseGeometry, str]] = []
-        # New: linear natural features (coastline, cliff, tree_row, ridge)
+        # NATURAL_LINE: (geom, tag_value) — tag_key is always "natural"
         self.natural_lines: List[Tuple[BaseGeometry, str]] = []
-        # (geom, building_tag, building_levels_raw)
-        self.buildings: List[Tuple[BaseGeometry, str, Optional[str]]] = []
-        # (geom, landuse_bucket_key)
-        self.landuses: List[Tuple[BaseGeometry, str]] = []
+        # BUILDING: (geom, tag_value, attr_dict)
+        self.buildings: List[Tuple[BaseGeometry, str, Dict[str, str]]] = []
+        # LANDUSE: (geom, tag_key, tag_value)
+        self.landuses: List[Tuple[BaseGeometry, str, str]] = []
 
         self._n_node_fail = 0
         self._n_way_fail = 0
@@ -784,21 +581,17 @@ class _OSMCollector(osmium.SimpleHandler):
 
     def node(self, n) -> None:
         tags = n.tags
-        amenity = tags.get("amenity")
-        shop = tags.get("shop")
-        natural = tags.get("natural")
-        if amenity is None and shop is None and natural is None:
+        found = _first_poi_tag(tags)
+        if found is None:
             return
-        category = _bucket_poi(amenity, shop, natural)
-        if category is None:
-            return
+        key, value = found
         try:
             loc = n.location
             lon, lat = loc.lon, loc.lat
         except Exception:
             self._n_node_fail += 1
             return
-        self.pois.append((lon, lat, category))
+        self.pois.append((lon, lat, key, value))
 
     # -- way ----------------------------------------------------------------
 
@@ -808,9 +601,9 @@ class _OSMCollector(osmium.SimpleHandler):
         ww = tags.get("waterway")
         rw = tags.get("railway")
         nat = tags.get("natural")
-        nat_line_cat = _bucket_natural_line(nat) if nat else None
+        is_natural_line = nat is not None and nat.lower() in _NATURAL_LINE_SET
 
-        if hw is None and ww is None and rw is None and nat_line_cat is None:
+        if hw is None and ww is None and rw is None and not is_natural_line:
             return
         try:
             wkb_hex = self._wkbf.create_linestring(w)
@@ -819,63 +612,71 @@ class _OSMCollector(osmium.SimpleHandler):
             return
         geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
 
-        # Highway wins if multiple keys coexist (very rare but possible).
         if hw is not None:
-            self.roads.append(
-                (geom, hw, tags.get("maxspeed"), tags.get("surface"))
-            )
+            # Keep a snapshot of useful road attributes.
+            attrs: Dict[str, str] = {}
+            for k in ("surface", "lit", "lanes", "access", "oneway",
+                      "bridge", "tunnel", "maxspeed"):
+                v = tags.get(k)
+                if v not in (None, ""):
+                    attrs[k] = v
+            self.roads.append((geom, hw, attrs))
         elif ww is not None:
             self.waterways.append((geom, ww))
         elif rw is not None:
             self.railways.append((geom, rw))
-        elif nat_line_cat is not None:
-            self.natural_lines.append((geom, nat_line_cat))
+        elif is_natural_line:
+            self.natural_lines.append((geom, nat))
 
     # -- area ---------------------------------------------------------------
 
     def area(self, a) -> None:
         tags = a.tags
         building = tags.get("building")
-        landuse = tags.get("landuse")
-        natural = tags.get("natural")
-
-        want_building = building is not None
-        want_landuse = (landuse is not None) or (natural is not None and natural.lower() in NATURAL_TO_CATEGORY)
-
-        if not want_building and not want_landuse:
+        if building is not None:
+            try:
+                wkb_hex = self._wkbf.create_multipolygon(a)
+            except Exception:
+                self._n_area_fail += 1
+                return
+            geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
+            attrs: Dict[str, str] = {}
+            for k in ("building:levels", "height"):
+                v = tags.get(k)
+                if v not in (None, ""):
+                    attrs[k] = v
+            self.buildings.append((geom, building, attrs))
             return
 
-        try:
-            wkb_hex = self._wkbf.create_multipolygon(a)
-        except Exception:
-            self._n_area_fail += 1
+        # Landuse-style polygon: first match in LANDUSE_TAG_KEYS wins.
+        for key in _LANDUSE_TAG_KEYS:
+            v = tags.get(key)
+            if v is None or v == "":
+                continue
+            if key == "natural" and v.lower() in _NATURAL_LINE_SET:
+                # Linear natural feature stored as area — skip (we take
+                # the linestring form through `way`).
+                continue
+            try:
+                wkb_hex = self._wkbf.create_multipolygon(a)
+            except Exception:
+                self._n_area_fail += 1
+                return
+            geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
+            self.landuses.append((geom, key, v))
             return
-        geom = shp_wkb.loads(bytes.fromhex(wkb_hex))
-
-        if want_building:
-            self.buildings.append((geom, building, tags.get("building:levels")))
-            return
-
-        bucket = _bucket_landuse(landuse, natural)
-        if bucket is None:
-            return
-        self.landuses.append((geom, bucket))
 
 
 def load_pbf(pbf_path: str) -> _OSMCollector:
-    """Parse the PBF via pyosmium and return the populated collector."""
     logger.info("loading PBF via pyosmium: %s", pbf_path)
     handler = _OSMCollector()
     handler.apply_file(pbf_path, locations=True, idx="flex_mem")
     logger.info(
-        "loaded: %d buildings, %d roads, %d pois, %d landuses, %d waterways, %d railways, %d natural_lines",
-        len(handler.buildings),
-        len(handler.roads),
-        len(handler.pois),
-        len(handler.landuses),
-        len(handler.waterways),
-        len(handler.railways),
-        len(handler.natural_lines),
+        "loaded: %d buildings, %d roads, %d pois, %d landuses, "
+        "%d waterways, %d railways, %d natural_lines",
+        len(handler.buildings), len(handler.roads), len(handler.pois),
+        len(handler.landuses), len(handler.waterways),
+        len(handler.railways), len(handler.natural_lines),
     )
     logger.info(
         "skipped (bad geometry): %d nodes, %d ways, %d areas",
@@ -890,7 +691,6 @@ def load_pbf(pbf_path: str) -> _OSMCollector:
 
 
 def _simplify(geom: BaseGeometry) -> Optional[BaseGeometry]:
-    """Ramer-Douglas-Peucker simplification, skipping points."""
     if geom is None or geom.is_empty:
         return None
     if isinstance(geom, Point):
@@ -902,88 +702,73 @@ def _simplify(geom: BaseGeometry) -> Optional[BaseGeometry]:
 
 
 def build_raw_objects(collector: _OSMCollector) -> List[_RawObject]:
-    """Apply simplification + tag bucketing to every collected feature
-    and return a single flat list of _RawObject ready for tokenization.
-    """
     out: List[_RawObject] = []
 
     logger.info("simplifying %d buildings", len(collector.buildings))
-    for geom, tag, levels_raw in collector.buildings:
+    for geom, tag_value, attrs in collector.buildings:
         g = _simplify(geom)
         if g is None:
             continue
-        tag_token = f"<TAG_{_bucket_building(tag)}>"
-        extras: List[str] = []
-        level_tok = _bucket_levels(levels_raw)
-        if level_tok:
-            extras.append(level_tok)
-        out.append(_RawObject(geom=g, kind="BUILDING", tag_token=tag_token, extra_tokens=extras))
+        out.append(_RawObject(
+            geom=g, kind="BUILDING",
+            tag_key="building", tag_value=tag_value, extra_tags=attrs,
+        ))
 
     logger.info("simplifying %d roads", len(collector.roads))
-    for geom, tag, maxspeed_raw, surface_raw in collector.roads:
+    for geom, tag_value, attrs in collector.roads:
         g = _simplify(geom)
         if g is None:
             continue
-        tag_token = f"<TAG_{_bucket_highway(tag)}>"
-        extras = []
-        speed_tok = _bucket_speed(maxspeed_raw)
-        if speed_tok:
-            extras.append(speed_tok)
-        surface_tok = _bucket_surface(surface_raw)
-        if surface_tok:
-            extras.append(surface_tok)
-        out.append(_RawObject(geom=g, kind="ROAD", tag_token=tag_token, extra_tokens=extras))
+        out.append(_RawObject(
+            geom=g, kind="ROAD",
+            tag_key="highway", tag_value=tag_value, extra_tags=attrs,
+        ))
 
     logger.info("packaging %d POIs", len(collector.pois))
-    for lon, lat, category in collector.pois:
+    for lon, lat, key, value in collector.pois:
         out.append(_RawObject(
-            geom=Point(lon, lat),
-            kind="POI",
-            tag_token=f"<TAG_{category}>",
+            geom=Point(lon, lat), kind="POI",
+            tag_key=key, tag_value=value,
         ))
 
     logger.info("simplifying %d landuse polygons", len(collector.landuses))
-    for geom, bucket in collector.landuses:
+    for geom, key, value in collector.landuses:
         g = _simplify(geom)
         if g is None:
             continue
         out.append(_RawObject(
-            geom=g,
-            kind="LANDUSE",
-            tag_token=f"<TAG_{bucket}>",
+            geom=g, kind="LANDUSE",
+            tag_key=key, tag_value=value,
         ))
 
     logger.info("simplifying %d waterways", len(collector.waterways))
-    for geom, tag in collector.waterways:
+    for geom, tag_value in collector.waterways:
         g = _simplify(geom)
         if g is None:
             continue
         out.append(_RawObject(
-            geom=g,
-            kind="WATERWAY",
-            tag_token=f"<TAG_{_bucket_waterway(tag)}>",
+            geom=g, kind="WATERWAY",
+            tag_key="waterway", tag_value=tag_value,
         ))
 
     logger.info("simplifying %d railways", len(collector.railways))
-    for geom, tag in collector.railways:
+    for geom, tag_value in collector.railways:
         g = _simplify(geom)
         if g is None:
             continue
         out.append(_RawObject(
-            geom=g,
-            kind="RAILWAY",
-            tag_token=f"<TAG_{_bucket_railway(tag)}>",
+            geom=g, kind="RAILWAY",
+            tag_key="railway", tag_value=tag_value,
         ))
 
     logger.info("simplifying %d natural lines", len(collector.natural_lines))
-    for geom, bucket in collector.natural_lines:
+    for geom, tag_value in collector.natural_lines:
         g = _simplify(geom)
         if g is None:
             continue
         out.append(_RawObject(
-            geom=g,
-            kind="NATURAL_LINE",
-            tag_token=f"<TAG_{bucket}>",
+            geom=g, kind="NATURAL_LINE",
+            tag_key="natural", tag_value=tag_value,
         ))
 
     logger.info("total raw objects: %d", len(out))
@@ -991,12 +776,8 @@ def build_raw_objects(collector: _OSMCollector) -> List[_RawObject]:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline stages: bbox, tokenize, sort
+# Pipeline stages
 # ---------------------------------------------------------------------------
-
-
-BBOX_PERCENTILE_LOW = 0.5
-BBOX_PERCENTILE_HIGH = 99.5
 
 
 def compute_bounds(
@@ -1004,32 +785,15 @@ def compute_bounds(
     low_pct: float = BBOX_PERCENTILE_LOW,
     high_pct: float = BBOX_PERCENTILE_HIGH,
 ) -> Tuple[float, float, float, float]:
-    """Robust chunk bounding box via centroid percentiles.
-
-    Raw `geom.bounds`-union is pathologically sensitive to outliers: a
-    single waterway or landuse relation that extends outside the chunk
-    stretches the bbox and wastes the 256-cell anchor grid on empty
-    space. We take the Nth / (100-N)th percentile of object *centroids*
-    instead — a few genuine outliers get clamped to the grid edges by
-    `anchor_tokens` (cheap, explicit `<X_0>`/`<X_255>` sentinels), while
-    the dense core of the chunk gets full anchor resolution.
-    """
     if not raws:
         raise ValueError("no geometries to bound")
-
-    lons = np.fromiter(
-        (r.geom.centroid.x for r in raws), dtype=np.float64, count=len(raws)
-    )
-    lats = np.fromiter(
-        (r.geom.centroid.y for r in raws), dtype=np.float64, count=len(raws)
-    )
-
+    lons = np.fromiter((r.geom.centroid.x for r in raws), dtype=np.float64, count=len(raws))
+    lats = np.fromiter((r.geom.centroid.y for r in raws), dtype=np.float64, count=len(raws))
     min_lon = float(np.percentile(lons, low_pct))
     max_lon = float(np.percentile(lons, high_pct))
     min_lat = float(np.percentile(lats, low_pct))
     max_lat = float(np.percentile(lats, high_pct))
     bounds = (min_lon, min_lat, max_lon, max_lat)
-
     n_out_lon = int(((lons < min_lon) | (lons > max_lon)).sum())
     n_out_lat = int(((lats < min_lat) | (lats > max_lat)).sum())
     logger.info(
@@ -1039,8 +803,7 @@ def compute_bounds(
     logger.info(
         "  centroids clamped to edge: %d lon, %d lat (%.2f%% of %d)",
         n_out_lon, n_out_lat,
-        100.0 * max(n_out_lon, n_out_lat) / max(len(raws), 1),
-        len(raws),
+        100.0 * max(n_out_lon, n_out_lat) / max(len(raws), 1), len(raws),
     )
     return bounds
 
@@ -1050,7 +813,7 @@ def tokenize_objects(
     bounds: Tuple[float, float, float, float],
 ) -> List[TokenizedObject]:
     out: List[TokenizedObject] = []
-    kind_counts: Counter[str] = Counter()
+    kind_counts: Counter = Counter()
     for r in raws:
         obj = tokenize_row(r, bounds=bounds)
         if obj is None:
@@ -1066,7 +829,6 @@ def sort_objects_hilbert(
     objects: List[TokenizedObject],
     bounds: Tuple[float, float, float, float],
 ) -> List[TokenizedObject]:
-    """Global Hilbert-curve sort, reusing the anchor-grid bbox."""
     if not objects:
         return objects
     keyed = [
@@ -1078,13 +840,52 @@ def sort_objects_hilbert(
 
 
 # ---------------------------------------------------------------------------
+# Macro-context row
+# ---------------------------------------------------------------------------
+
+
+def build_context_object(
+    region: Optional[str],
+    climate: Optional[str],
+    density: Optional[str],
+    bounds: Tuple[float, float, float, float],
+) -> TokenizedObject:
+    """Produce the synthetic `CONTEXT` row that gets prepended to the
+    corpus. For planet-scale chunking, the three values come from H3
+    cell metadata; for Stockholm PoC they come from CLI flags.
+    """
+    tokens: List[str] = ["<CONTEXT_START>"]
+    if region:
+        r = region.upper()
+        if r in VS.REGIONS:
+            tokens.append(f"<REGION_{r}>")
+    if climate:
+        c = climate.upper()
+        if c in VS.CLIMATES:
+            tokens.append(f"<CLIMATE_{c}>")
+    if density:
+        d = density.upper()
+        if d in VS.DENSITIES:
+            tokens.append(f"<DENSITY_{d}>")
+    tokens.append("<CONTEXT_END>")
+
+    cx = 0.5 * (bounds[0] + bounds[2])
+    cy = 0.5 * (bounds[1] + bounds[3])
+    return TokenizedObject(
+        kind="CONTEXT",
+        tag_token=f"<REGION_{(region or 'EUROPE').upper()}>",
+        tokens=tokens,
+        centroid_lon=cx,
+        centroid_lat=cy,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Parquet writing
 # ---------------------------------------------------------------------------
 
 
-def _object_batches(
-    objects: Iterable[TokenizedObject], chunk_size: int
-) -> Iterator[pa.RecordBatch]:
+def _object_batches(objects: Iterable[TokenizedObject], chunk_size: int) -> Iterator[pa.RecordBatch]:
     schema = pa.schema([
         pa.field("kind", pa.string()),
         pa.field("tag_token", pa.string()),
@@ -1093,7 +894,6 @@ def _object_batches(
         pa.field("n_tokens", pa.int32()),
         pa.field("tokens", pa.list_(pa.string())),
     ])
-
     buf: List[TokenizedObject] = []
     for obj in objects:
         buf.append(obj)
@@ -1119,9 +919,7 @@ def _batch_from_buf(buf: List[TokenizedObject], schema: pa.Schema) -> pa.RecordB
 
 
 def write_parquet(
-    objects: List[TokenizedObject],
-    out_path: str,
-    chunk_size: int = CHUNK_SIZE,
+    objects: List[TokenizedObject], out_path: str, chunk_size: int = CHUNK_SIZE,
 ) -> None:
     logger.info("writing parquet to %s (chunk_size=%d)", out_path, chunk_size)
     writer: Optional[pq.ParquetWriter] = None
@@ -1153,16 +951,10 @@ def _family_of(token: str) -> str:
 
 
 def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> int:
-    """Write a sorted, deduplicated vocabulary JSON from the corpus.
-    Logs a family-level audit and returns the total unique token count.
-    """
     vocab: set[str] = set()
     for obj in objects:
         vocab.update(obj.tokens)
-    payload = {
-        "size": len(vocab),
-        "tokens": sorted(vocab),
-    }
+    payload = {"size": len(vocab), "tokens": sorted(vocab)}
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     logger.info("vocab dumped: %d unique tokens -> %s", len(vocab), out_path)
@@ -1171,7 +963,6 @@ def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> int:
     logger.info("vocab audit (unique tokens per family):")
     for family, count in families.most_common():
         logger.info("  %-14s %d", family, count)
-
     return len(vocab)
 
 
@@ -1182,17 +973,20 @@ def dump_vocab(objects: Iterable[TokenizedObject], out_path: str) -> int:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", "-i", required=True,
-                        help="Path to the .osm.pbf extract")
-    parser.add_argument("--output-dir", "-o", required=True,
-                        help="Directory to write tokens + vocab into")
-    parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE,
-                        help=f"Objects per Parquet row-group (default: {CHUNK_SIZE})")
+    parser.add_argument("--input", "-i", required=True)
+    parser.add_argument("--output-dir", "-o", required=True)
+    parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--vocab-name", default="stockholm_vocab.json")
     parser.add_argument("--output-name", default="stockholm_tokens.parquet")
+    parser.add_argument("--vocab-limit", type=int, default=4096)
     parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("--vocab-limit", type=int, default=1000,
-                        help="Hard ceiling on unique tokens (default: 1000)")
+    # Macro-context flags.
+    parser.add_argument("--region", default=None,
+                        help=f"One of {VS.REGIONS}")
+    parser.add_argument("--climate", default=None,
+                        help=f"One of {VS.CLIMATES}")
+    parser.add_argument("--density", default=None,
+                        help=f"One of {VS.DENSITIES}")
     return parser.parse_args(argv)
 
 
@@ -1208,16 +1002,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Stage 1: parse all target feature classes from the PBF.
+    # Stage 1: parse.
     collector = load_pbf(args.input)
 
-    # Stage 2: simplify + bucket + assemble _RawObjects.
+    # Stage 2: simplify + assemble raw objects.
     raws = build_raw_objects(collector)
     if not raws:
         logger.error("no geometries survived simplification; aborting")
         return 3
 
-    # Stage 3: chunk-level bounding box (used for grid + Hilbert).
+    # Stage 3: robust bounding box.
     bounds = compute_bounds(raws)
 
     # Stage 4: tokenize.
@@ -1226,22 +1020,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Stage 5: Hilbert-curve sort by centroid.
     objects = sort_objects_hilbert(objects, bounds)
 
-    # Stage 6: persist parquet + vocab.
+    # Stage 6: prepend the macro-context row.
+    context_obj = build_context_object(
+        region=args.region, climate=args.climate, density=args.density,
+        bounds=bounds,
+    )
+    objects = [context_obj] + objects
+
+    # Stage 7: persist.
     parquet_path = os.path.join(args.output_dir, args.output_name)
     vocab_path = os.path.join(args.output_dir, args.vocab_name)
     write_parquet(objects, parquet_path, chunk_size=args.chunk_size)
     vocab_size = dump_vocab(objects, vocab_path)
 
-    # Vocab ceiling check — the whole point of the bucketing pivot.
     status = "OK" if vocab_size <= args.vocab_limit else "OVER LIMIT"
     logger.info(
-        "TOTAL VOCAB SIZE: %d (limit %d) -> %s",
-        vocab_size, args.vocab_limit, status,
+        "TOTAL VOCAB SIZE: %d (limit %d, spec-max %d) -> %s",
+        vocab_size, args.vocab_limit, VS.vocabulary_size(), status,
     )
     if vocab_size > args.vocab_limit:
         logger.error("vocabulary exceeds --vocab-limit; failing")
         return 4
-
     logger.info("done.")
     return 0
 
