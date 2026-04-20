@@ -1,0 +1,4 @@
+# Minimal local requirement set for driving the Modal pipeline.
+# The actual parser/training dependencies are installed inside the Modal image
+# declared in `modal_app.py`, so the local machine only needs the Modal client.
+modal>=1.1

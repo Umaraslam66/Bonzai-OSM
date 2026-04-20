@@ -25,6 +25,9 @@ World-scale OpenStreetMap ingestion and preprocessing for a generative "map LLM"
 - [commands.md](./commands.md): copy-paste operational commands
 - [docs/LUXEMBOURG_TEST.md](./docs/LUXEMBOURG_TEST.md): complete analysis of the first validated regional test on Leonardo
 - [docs/LUXEMBOURG_FORMAT_BENCHMARK.md](./docs/LUXEMBOURG_FORMAT_BENCHMARK.md): benchmark plan for comparing full Luxembourg exports across formats
+- [docs/GRAPH_MODEL_SMOKETEST_DESIGN.md](./docs/GRAPH_MODEL_SMOKETEST_DESIGN.md): graph-native smoke-test architecture for city-structure learning
+- [docs/PBF_MODAL_CITY_MODEL_PIPELINE.md](./docs/PBF_MODAL_CITY_MODEL_PIPELINE.md): concrete `PBF -> graph dataset -> Modal A100 train/eval` plan
+- [city_graph_modal/README.md](./city_graph_modal/README.md): implementation notes for the graph-native Luxembourg smoke test
 - [scripts/leonardo_cleanup.sh](./scripts/leonardo_cleanup.sh): safe cleanup helper
 - [scripts/leonardo_download_planet.sh](./scripts/leonardo_download_planet.sh): datamover-based planet download helper
 - [scripts/osm_layer_summary.py](./scripts/osm_layer_summary.py): generate one JSON file with counts, properties, tag coverage, and sample features
@@ -37,6 +40,7 @@ World-scale OpenStreetMap ingestion and preprocessing for a generative "map LLM"
 - [jobs/luxembourg_full_parquet.sbatch](./jobs/luxembourg_full_parquet.sbatch): full Luxembourg export to per-layer Parquet/GeoParquet
 - [jobs/luxembourg_full_geojsonseq.sbatch](./jobs/luxembourg_full_geojsonseq.sbatch): full Luxembourg export to per-layer GeoJSONSeq
 - [jobs/leonardo_osm_extract.sbatch](./jobs/leonardo_osm_extract.sbatch): future `osmium` extract template once `osmium` is installed or built
+- [city_graph_modal/modal_app.py](./city_graph_modal/modal_app.py): Modal entrypoint for PBF upload, graph preparation, A100 training, and evaluation
 
 ## Operational Rules
 
@@ -53,3 +57,5 @@ Prototype the parsing pipeline on a small Geofabrik extract such as Luxembourg o
 The Luxembourg validation is now complete through the first roads extraction. Read [docs/LUXEMBOURG_TEST.md](./docs/LUXEMBOURG_TEST.md) for the exact commands, job IDs, outputs, failures, fixes, and conclusions.
 
 The next benchmark is a full Luxembourg export across GeoJSON, GeoPackage, Parquet, and GeoJSONSeq. See [docs/LUXEMBOURG_FORMAT_BENCHMARK.md](./docs/LUXEMBOURG_FORMAT_BENCHMARK.md).
+
+In parallel, the repo now includes a graph-native Luxembourg smoke test aimed at city-structure reconstruction and later conditional city construction. See [city_graph_modal/README.md](./city_graph_modal/README.md).
