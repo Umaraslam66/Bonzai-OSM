@@ -14,8 +14,6 @@ Also prints a summary with the top-10 values per key so you can
 eyeball the tokenizer vocabulary without opening each CSV.
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
 import json
