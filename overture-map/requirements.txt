@@ -1,0 +1,6 @@
+duckdb>=1.1
+pandas
+matplotlib
+pyarrow
+requests
+huggingface_hub>=0.25
