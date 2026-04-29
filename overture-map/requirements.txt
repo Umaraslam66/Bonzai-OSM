@@ -8,3 +8,4 @@ plotly>=5.20
 pillow>=10
 folium>=0.17
 branca>=0.7
+pydeck>=0.9
