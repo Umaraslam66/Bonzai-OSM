@@ -1,31 +1,51 @@
-"""Single map showing Overture (wide) vs Foursquare (deep).
+"""Single overlay map — Overture (blue) vs Foursquare (red).
 
-Two density heat layers, one blue (Overture), one red (Foursquare),
-both visible at once on an OpenStreetMap base.  Where the two layers
-overlap they blend toward purple — so the visual story is:
+The story we want the picture to tell, in one glance:
+  - Overture is wide  → dim blue covers continental interiors (rural OSM)
+  - Foursquare is deep → bright red dots concentrate in cities globally
+  - Where both have data  → purple/magenta blend
+  - Where neither has data → basemap shows through (transparent)
 
-  - large blue regions with no red       → Overture-only (wide rural coverage)
-  - bright red blobs with little blue    → Foursquare-only (deep urban POIs)
-  - purple/magenta tinted regions        → both sources have data
-  - white/no-color regions               → neither source has data
+Approach:
+  1. Pivot the 0.5° dominance grid into a 360×720 RGBA raster where the
+     red channel = log scaled FSQ count and the blue channel = log scaled
+     Ovt count.  This is REAL pixel blending — equal counts produce
+     proper purple, not the layer-occlusion that two Plotly heat traces
+     produced.
+  2. Save the raster as PNG.
+  3. Drop the PNG onto an OSM basemap as a single image overlay layer.
 
-Single self-contained HTML.  Pan, zoom, hover.  Toggle each source on/off
-by clicking its legend entry.
-
-Run locally on the Mac after rsyncing the CSV from Leonardo:
+Run locally on the Mac:
     .venv/bin/python scripts/12_render_dominance_map.py
 """
 from __future__ import annotations
+import base64
+from io import BytesIO
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from PIL import Image
 import plotly.graph_objects as go
 
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 GRID_CSV = OUTPUTS / "source_dominance_grid.csv"
-OUT = OUTPUTS / "source_overlay_map.html"
+OUT_HTML = OUTPUTS / "source_overlay_map.html"
+OUT_PNG = OUTPUTS / "source_overlay_raster.png"
+
+# 0.5° grid → 360 × 720 raster
+GRID = 2
+NLAT = 180 * GRID  # 360
+NLON = 360 * GRID  # 720
+LAT_OFFSET = 90 * GRID
+LON_OFFSET = 180 * GRID
+
+# Saturate at 10^5 places per cell — cells with more than that become
+# fully bright (Manhattan, central Tokyo).  Below 10 → near-invisible.
+LOG_MIN = 1.0
+LOG_MAX = 5.0
+
 
 if not GRID_CSV.exists():
     raise SystemExit(
@@ -36,91 +56,71 @@ if not GRID_CSV.exists():
     )
 
 print(f"[load] {GRID_CSV}")
-df = pd.read_csv(GRID_CSV)
+df = pd.read_csv(GRID_CSV, low_memory=False)
 print(f"[load] {len(df):,} cells in the 0.5° grid")
 
-# Filter noise floor — single-village cells add nothing visually.
-ovt = df[df["n_ovt"] >= 50].copy()
-fsq = df[df["n_fsq"] >= 50].copy()
-print(f"[filt] showing {len(ovt):,} Ovt cells and {len(fsq):,} FSQ cells "
-      f"with ≥50 places each")
 
-# Use log10 for the heat weight — POI counts span 5 orders of magnitude
-ovt_z = np.log10(ovt["n_ovt"]).clip(lower=1.0)
-fsq_z = np.log10(fsq["n_fsq"]).clip(lower=1.0)
+# -------- 1. Build the RGBA raster ----------------------------------
+
+def normalize(arr: np.ndarray) -> np.ndarray:
+    """log10(n+1), clipped to [LOG_MIN, LOG_MAX], scaled to [0, 1]."""
+    v = np.log10(arr + 1.0)
+    return ((v - LOG_MIN) / (LOG_MAX - LOG_MIN)).clip(0.0, 1.0)
 
 
-def transparent_scale(rgb_hex: str) -> list:
-    """Build a colorscale that fades from fully transparent to opaque colour.
+ovt_arr = np.zeros((NLAT, NLON), dtype=np.float64)
+fsq_arr = np.zeros((NLAT, NLON), dtype=np.float64)
+iy = (df["gy"].to_numpy() + LAT_OFFSET).astype(np.int32)
+ix = (df["gx"].to_numpy() + LON_OFFSET).astype(np.int32)
+valid = (iy >= 0) & (iy < NLAT) & (ix >= 0) & (ix < NLON)
+ovt_arr[iy[valid], ix[valid]] = df["n_ovt"].to_numpy()[valid]
+fsq_arr[iy[valid], ix[valid]] = df["n_fsq"].to_numpy()[valid]
 
-    Plotly's Densitymapbox interpolates the bottom of the scale onto every
-    pixel, so a colorscale that starts at rgba(...,0) keeps unfilled cells
-    invisible and lets the basemap show through.
-    """
-    return [
-        [0.00, "rgba(0,0,0,0)"],
-        [0.05, "rgba(0,0,0,0)"],
-        [0.30, _hex_to_rgba(rgb_hex, 0.30)],
-        [0.70, _hex_to_rgba(rgb_hex, 0.65)],
-        [1.00, _hex_to_rgba(rgb_hex, 0.85)],
-    ]
+ovt_n = normalize(ovt_arr)
+fsq_n = normalize(fsq_arr)
+
+# Build RGBA: red channel from FSQ, blue channel from Ovt, alpha from max.
+# Bias the alpha curve so even small counts become visible.
+rgba = np.zeros((NLAT, NLON, 4), dtype=np.uint8)
+rgba[..., 0] = (fsq_n * 255).astype(np.uint8)              # red   = FSQ
+rgba[..., 1] = (np.minimum(fsq_n, ovt_n) * 60).astype(np.uint8)  # green hint where both
+rgba[..., 2] = (ovt_n * 255).astype(np.uint8)              # blue  = Ovt
+alpha = np.maximum(ovt_n, fsq_n) ** 0.6                    # γ-correct for visibility
+rgba[..., 3] = (alpha * 230).astype(np.uint8)              # cap at 230 so map shows through
+
+# Flip vertically — image origin top-left, geographic origin bottom-left
+rgba = np.flipud(rgba)
+
+img = Image.fromarray(rgba, mode="RGBA")
+img.save(OUT_PNG)
+print(f"[png ] {OUT_PNG}  ({OUT_PNG.stat().st_size / 1e3:.0f} KB)")
 
 
-def _hex_to_rgba(h: str, a: float) -> str:
-    h = h.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{a})"
+# -------- 2. Embed PNG as base64 data URL into Plotly map -----------
+
+with open(OUT_PNG, "rb") as fh:
+    img_b64 = base64.b64encode(fh.read()).decode("ascii")
+img_uri = f"data:image/png;base64,{img_b64}"
 
 
-# Overture → blue (#3b82f6); Foursquare → red (#ef4444)
-OVT_COLOR = "#3b82f6"
-FSQ_COLOR = "#ef4444"
+# -------- 3. Plot the basemap with the raster overlay --------------
 
 fig = go.Figure()
 
-fig.add_trace(go.Densitymapbox(
-    name="Overture (wide coverage)",
-    lat=ovt["lat_center"],
-    lon=ovt["lon_center"],
-    z=ovt_z,
-    radius=12,
-    colorscale=transparent_scale(OVT_COLOR),
-    showscale=False,
-    hovertemplate=(
-        "<b>Overture</b><br>"
-        "lat %{lat:.1f}, lon %{lon:.1f}<br>"
-        "log₁₀ count: %{z:.2f}<extra></extra>"
-    ),
-    opacity=1.0,
-    zmin=1.0,
-    zmax=6.0,
-))
-
-fig.add_trace(go.Densitymapbox(
-    name="Foursquare (deep urban)",
-    lat=fsq["lat_center"],
-    lon=fsq["lon_center"],
-    z=fsq_z,
-    radius=12,
-    colorscale=transparent_scale(FSQ_COLOR),
-    showscale=False,
-    hovertemplate=(
-        "<b>Foursquare</b><br>"
-        "lat %{lat:.1f}, lon %{lon:.1f}<br>"
-        "log₁₀ count: %{z:.2f}<extra></extra>"
-    ),
-    opacity=1.0,
-    zmin=1.0,
-    zmax=6.0,
+# Empty trace just to anchor mapbox layout — the actual data is the raster.
+fig.add_trace(go.Scattermapbox(
+    lat=[None], lon=[None], mode="markers",
+    marker=dict(size=1), showlegend=False, hoverinfo="skip",
 ))
 
 fig.update_layout(
     title=dict(
         text=(
-            "<b>Overture vs Foursquare — wide vs deep</b><br>"
+            "<b>Overture (blue) vs Foursquare (red) — wide vs deep</b><br>"
             "<span style='font-size:13px;color:#aaa'>"
-            "blue = Overture · red = Foursquare · purple = both<br>"
-            "click a legend entry to toggle, scroll to zoom"
+            "blue saturation = Overture density · "
+            "red saturation = Foursquare density · "
+            "purple = both have data · drag/scroll to zoom"
             "</span>"
         ),
         x=0.5,
@@ -130,24 +130,42 @@ fig.update_layout(
     margin=dict(l=0, r=0, t=80, b=0),
     paper_bgcolor="#0a0a0a",
     font=dict(color="#ddd"),
-    showlegend=True,
-    legend=dict(
-        x=0.01,
-        y=0.99,
-        xanchor="left",
-        yanchor="top",
-        bgcolor="rgba(20,20,20,0.92)",
-        font=dict(color="#eee", size=14),
-        bordercolor="#444",
-        borderwidth=1,
-    ),
+    showlegend=False,
     mapbox=dict(
         style="open-street-map",
         center=dict(lat=20, lon=10),
         zoom=1.5,
+        layers=[dict(
+            below="traces",
+            sourcetype="image",
+            source=img_uri,
+            coordinates=[
+                [-180,  90],   # top-left
+                [ 180,  90],   # top-right
+                [ 180, -90],   # bottom-right
+                [-180, -90],   # bottom-left
+            ],
+        )],
     ),
+    annotations=[
+        dict(
+            x=0.01, y=0.05, xref="paper", yref="paper",
+            xanchor="left", yanchor="bottom", showarrow=False,
+            text=(
+                "<span style='background:#0a0a0a;padding:8px 12px;"
+                "border:1px solid #555;border-radius:4px;'>"
+                "<b>Legend</b><br>"
+                "<span style='color:#3b82f6'>■</span> Overture (wide)<br>"
+                "<span style='color:#a855f7'>■</span> Both sources<br>"
+                "<span style='color:#ef4444'>■</span> Foursquare (deep)<br>"
+                "<span style='color:#aaa'>brightness ∝ POI density</span>"
+                "</span>"
+            ),
+            font=dict(size=13, color="#eee"),
+        ),
+    ],
 )
 
-fig.write_html(OUT, include_plotlyjs="cdn")
-print(f"\n[render] {OUT}  ({OUT.stat().st_size / 1e6:.1f} MB)")
-print("\nopen in browser, pan/zoom, toggle layers via legend.")
+fig.write_html(OUT_HTML, include_plotlyjs="cdn")
+print(f"[html] {OUT_HTML}  ({OUT_HTML.stat().st_size / 1e6:.1f} MB)")
+print("\nopen in browser — single overlaid raster, true RGB blend.")
