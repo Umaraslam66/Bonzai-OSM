@@ -9,23 +9,22 @@ The story we want the picture to tell, in one glance:
 Approach:
   1. Pivot the 0.5° dominance grid into a 360×720 RGBA raster where the
      red channel = log scaled FSQ count and the blue channel = log scaled
-     Ovt count.  This is REAL pixel blending — equal counts produce
-     proper purple, not the layer-occlusion that two Plotly heat traces
-     produced.
+     Ovt count.  Real pixel blending — equal counts produce proper purple.
   2. Save the raster as PNG.
-  3. Drop the PNG onto an OSM basemap as a single image overlay layer.
+  3. Drop the PNG onto an OSM basemap as a Folium ImageOverlay (Leaflet,
+     robust raster handling).
 
 Run locally on the Mac:
     .venv/bin/python scripts/12_render_dominance_map.py
 """
 from __future__ import annotations
-import base64
-from io import BytesIO
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from PIL import Image
-import plotly.graph_objects as go
+import folium
+from folium.raster_layers import ImageOverlay
+from branca.element import Template, MacroElement
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -79,93 +78,84 @@ fsq_arr[iy[valid], ix[valid]] = df["n_fsq"].to_numpy()[valid]
 ovt_n = normalize(ovt_arr)
 fsq_n = normalize(fsq_arr)
 
-# Build RGBA: red channel from FSQ, blue channel from Ovt, alpha from max.
-# Bias the alpha curve so even small counts become visible.
 rgba = np.zeros((NLAT, NLON, 4), dtype=np.uint8)
 rgba[..., 0] = (fsq_n * 255).astype(np.uint8)              # red   = FSQ
 rgba[..., 1] = (np.minimum(fsq_n, ovt_n) * 60).astype(np.uint8)  # green hint where both
 rgba[..., 2] = (ovt_n * 255).astype(np.uint8)              # blue  = Ovt
-alpha = np.maximum(ovt_n, fsq_n) ** 0.6                    # γ-correct for visibility
-rgba[..., 3] = (alpha * 230).astype(np.uint8)              # cap at 230 so map shows through
+alpha = np.maximum(ovt_n, fsq_n) ** 0.6                    # γ-correct
+rgba[..., 3] = (alpha * 220).astype(np.uint8)
 
-# Flip vertically — image origin top-left, geographic origin bottom-left
+# Flip — image origin top-left, geographic origin bottom-left
 rgba = np.flipud(rgba)
 
 img = Image.fromarray(rgba, mode="RGBA")
+# Upscale 4× with nearest-neighbour so cell borders are crisp at zoom-out
+img = img.resize((NLON * 4, NLAT * 4), Image.NEAREST)
 img.save(OUT_PNG)
-print(f"[png ] {OUT_PNG}  ({OUT_PNG.stat().st_size / 1e3:.0f} KB)")
+print(f"[png ] {OUT_PNG}  ({OUT_PNG.stat().st_size / 1e3:.0f} KB, "
+      f"{img.size[0]}×{img.size[1]})")
 
 
-# -------- 2. Embed PNG as base64 data URL into Plotly map -----------
+# -------- 2. Folium map with ImageOverlay -----------------------------
 
-with open(OUT_PNG, "rb") as fh:
-    img_b64 = base64.b64encode(fh.read()).decode("ascii")
-img_uri = f"data:image/png;base64,{img_b64}"
-
-
-# -------- 3. Plot the basemap with the raster overlay --------------
-
-fig = go.Figure()
-
-# Empty trace just to anchor mapbox layout — the actual data is the raster.
-fig.add_trace(go.Scattermapbox(
-    lat=[None], lon=[None], mode="markers",
-    marker=dict(size=1), showlegend=False, hoverinfo="skip",
-))
-
-fig.update_layout(
-    title=dict(
-        text=(
-            "<b>Overture (blue) vs Foursquare (red) — wide vs deep</b><br>"
-            "<span style='font-size:13px;color:#aaa'>"
-            "blue saturation = Overture density · "
-            "red saturation = Foursquare density · "
-            "purple = both have data · drag/scroll to zoom"
-            "</span>"
-        ),
-        x=0.5,
-        font=dict(size=18, color="#eee"),
-    ),
-    height=820,
-    margin=dict(l=0, r=0, t=80, b=0),
-    paper_bgcolor="#0a0a0a",
-    font=dict(color="#ddd"),
-    showlegend=False,
-    mapbox=dict(
-        style="open-street-map",
-        center=dict(lat=20, lon=10),
-        zoom=1.5,
-        layers=[dict(
-            below="traces",
-            sourcetype="image",
-            source=img_uri,
-            coordinates=[
-                [-180,  90],   # top-left
-                [ 180,  90],   # top-right
-                [ 180, -90],   # bottom-right
-                [-180, -90],   # bottom-left
-            ],
-        )],
-    ),
-    annotations=[
-        dict(
-            x=0.01, y=0.05, xref="paper", yref="paper",
-            xanchor="left", yanchor="bottom", showarrow=False,
-            text=(
-                "<span style='background:#0a0a0a;padding:8px 12px;"
-                "border:1px solid #555;border-radius:4px;'>"
-                "<b>Legend</b><br>"
-                "<span style='color:#3b82f6'>■</span> Overture (wide)<br>"
-                "<span style='color:#a855f7'>■</span> Both sources<br>"
-                "<span style='color:#ef4444'>■</span> Foursquare (deep)<br>"
-                "<span style='color:#aaa'>brightness ∝ POI density</span>"
-                "</span>"
-            ),
-            font=dict(size=13, color="#eee"),
-        ),
-    ],
+m = folium.Map(
+    location=[20, 10],
+    zoom_start=2,
+    tiles="cartodbdark_matter",  # dark basemap so red/blue pop
+    world_copy_jump=True,
 )
 
-fig.write_html(OUT_HTML, include_plotlyjs="cdn")
-print(f"[html] {OUT_HTML}  ({OUT_HTML.stat().st_size / 1e6:.1f} MB)")
-print("\nopen in browser — single overlaid raster, true RGB blend.")
+ImageOverlay(
+    image=str(OUT_PNG),
+    bounds=[[-90, -180], [90, 180]],   # [[south, west], [north, east]]
+    opacity=0.85,
+    interactive=False,
+    cross_origin=False,
+    zindex=1,
+).add_to(m)
+
+# Title + legend HTML overlay
+legend_html = """
+{% macro html(this, kwargs) %}
+<div style="
+  position: fixed;
+  top: 12px; left: 50%; transform: translateX(-50%);
+  background: rgba(10,10,10,0.92); color: #eee;
+  padding: 10px 18px; border: 1px solid #444; border-radius: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px; z-index: 9999; text-align: center;
+">
+  <b>Overture (blue) vs Foursquare (red) — wide vs deep</b><br>
+  <span style="font-size:12px;color:#aaa">
+    blue saturation = Overture density · red = Foursquare · purple = both
+  </span>
+</div>
+<div style="
+  position: fixed;
+  bottom: 24px; left: 12px;
+  background: rgba(10,10,10,0.92); color: #eee;
+  padding: 10px 14px; border: 1px solid #444; border-radius: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px; z-index: 9999;
+">
+  <b>Legend</b><br>
+  <span style="display:inline-block;width:14px;height:14px;background:#3b82f6;
+    border-radius:2px;vertical-align:middle"></span>
+  &nbsp;Overture (wide rural)<br>
+  <span style="display:inline-block;width:14px;height:14px;background:#a855f7;
+    border-radius:2px;vertical-align:middle"></span>
+  &nbsp;Both sources<br>
+  <span style="display:inline-block;width:14px;height:14px;background:#ef4444;
+    border-radius:2px;vertical-align:middle"></span>
+  &nbsp;Foursquare (deep urban)<br>
+  <span style="color:#aaa;font-size:11px">brightness ∝ POI density</span>
+</div>
+{% endmacro %}
+"""
+macro = MacroElement()
+macro._template = Template(legend_html)
+m.get_root().add_child(macro)
+
+m.save(str(OUT_HTML))
+print(f"[html] {OUT_HTML}  ({OUT_HTML.stat().st_size / 1e3:.0f} KB)")
+print("\nopen in browser — Folium/Leaflet image overlay on dark CartoDB basemap.")
