@@ -7,13 +7,15 @@ Global vocabulary design for the Bonzai generative map model, driven by empirica
 ```
 overture-map/
 ├── README.md                    — this file
-├── leonardo.sbatch              — SLURM job for lrd_all_serial
+├── leonardo.sbatch              — SLURM job for lrd_all_serial (freq passes)
+├── leonardo_dedup.sbatch        — SLURM job for lrd_all_serial (dedup)
+├── leonardo_dedup_prod.sbatch   — SLURM job for boost_usr_prod (dedup, fast)
 ├── requirements.txt             — duckdb, pandas, matplotlib, pyarrow, requests
 │
 ├── docs/
 │   ├── VOCAB_ANALYSIS.md        — per-field vocab recommendations (auto-regenerated)
 │   ├── DATA_SOURCES.md          — external POI/building/address datasets we considered
-│   └── MULTI_SOURCE_ANALYSIS.md — Overture + Foursquare + OpenAddresses side-by-side
+│   └── MULTI_SOURCE_ANALYSIS.md — Overture + Foursquare + OpenAddresses + dedup outcome
 │
 ├── scripts/
 │   ├── common.py                — release pin, S3 config, DuckDB bootstrap
@@ -21,8 +23,10 @@ overture-map/
 │   ├── 02_freq_pass.py          — per-column global GROUP BY on S3 (streaming, OOM-safe)
 │   ├── 04_fsq_download.sh       — download Foursquare OS Places → $CINECA_SCRATCH
 │   ├── 05_oa_download.sh        — download OpenAddresses global → $CINECA_SCRATCH
-│   ├── 06_fsq_freq_pass.py      — frequency scan on local FSQ parquet
+│   ├── 06_fsq_freq_pass.py     — frequency scan on local FSQ parquet
 │   ├── 07_oa_inspect.py         — walk OA zip, per-country summary without extraction
+│   ├── 08_dedup_places.py       — Overture ∪ Foursquare spatial+name dedup
+│   ├── inventory.py             — pretty-print schema + freq inventory
 │   └── analyze.py               — read CSVs, write VOCAB_ANALYSIS.md
 │
 ├── schema/                      — DESCRIBE output for all 14 theme/type combos
@@ -110,10 +114,23 @@ See [`docs/VOCAB_ANALYSIS.md`](docs/VOCAB_ANALYSIS.md) for the full per-field br
 
 Estimated final vocab size: **~1 200 tokens** for a balanced first-cut.
 
-## Next steps (deferred)
+## Dedup outcome (2026-04-29)
 
-See [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md) for research on supplementary datasets:
-- Foursquare OS Places (100M+ POIs, complements Overture in non-OECD coverage)
-- Google-Microsoft Open Buildings combined (2.58B footprints — same as Overture's building source)
-- OpenAddresses (600M addresses — complements Overture in US/CA/AU/EU)
-- Overture Bridge Files (GERS ↔ OSM/Meta/MS ID mapping for label recovery)
+`scripts/08_dedup_places.py` cross-matched Overture ∪ Foursquare worldwide on Leonardo `boost_usr_prod` (32 cores, 200 GB RAM). Headline:
+
+| | Overture | Foursquare | Merged |
+|---|---:|---:|---:|
+| total places | 75.5 M | 99.9 M | **127.1 M** |
+| matched to other source | 32.6 M (43%) | 48.3 M (48%) | — |
+| unique to source | 42.9 M | 51.7 M | — |
+
+Foursquare adds **+52 M unique POIs** (68 % growth over Overture-alone), concentrated in Asia / LatAm / Eastern Europe. See [`docs/MULTI_SOURCE_ANALYSIS.md § Dedup outcome`](docs/MULTI_SOURCE_ANALYSIS.md#dedup-outcome--overture--foursquare).
+
+## Next steps
+
+See [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md) and the [next-actions list](docs/MULTI_SOURCE_ANALYSIS.md#next-concrete-actions-priority-order):
+
+1. Build the unified POI master table from `dedup_fsq_decisions.parquet` (~127 M rows).
+2. Re-run frequency passes on the merged universe → re-derive POI vocab on the FSQ hierarchical taxonomy.
+3. Overture Bridge Files → OSM tag join to recover building semantic labels (94 % null in Overture).
+4. (Optional) Per-region OpenAddresses integration for street-number tokens.

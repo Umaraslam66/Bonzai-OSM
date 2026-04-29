@@ -3,6 +3,9 @@
 All three global datasets mirrored on Leonardo `$CINECA_SCRATCH/bonzai-data/` as of 2026-04-22.
 Paired with `VOCAB_ANALYSIS.md` (Overture-only decisions); this document synthesizes across sources.
 
+> **Dedup completed 2026-04-29** — Overture ∪ Foursquare spatial+name match.
+> See [§ Dedup outcome](#dedup-outcome--overture--foursquare) below.
+
 ## Dataset sizes
 
 | dataset | release | size on disk | records | files |
@@ -103,11 +106,42 @@ Concrete **complementarity**: Foursquare adds roughly 25–40 M POIs in Indonesi
 3. **Building labels still the biggest gap.** None of the three sources fills the 94 % null on Overture's building subtype. The remaining path is Overture Bridge Files → OSM tags for buildings that came from OSM.
 4. **Closed POIs — policy decision.** FSQ's 7 % closed is ~7.5 M historical closures. For a generative model of "live" cities, filter those out. For a model of urban change over time, they're signal.
 
+## Dedup outcome — Overture ∪ Foursquare
+
+Pipeline: `scripts/08_dedup_places.py` — streaming grid hash-join (550 m bucket, 3×3 neighbour expansion, ≤50 m great-circle filter, Jaro-Winkler name similarity), single-shot SQL via DuckDB on Leonardo `boost_usr_prod` (32 cores, 200 GB RAM, ~25 min wall).
+
+### Headline numbers
+
+| metric | value |
+|---|---:|
+| Overture places (named, lat/lon present) | 75,495,994 |
+| Foursquare places (open, lat/lon present) | 99,904,729 |
+| Candidate pairs ≤ ~66 m | 1,444,390,420 |
+| FSQ matched to Overture (confident + probable, ≤50 m) | **48,252,270** (48.3%) |
+| FSQ unique (no Overture match) | **51,652,459** (51.7%) |
+| Overture matched (any tier) | 32,559,028 (43.1%) |
+| Overture unique | 42,936,966 (56.9%) |
+| **Merged universe (Overture ∪ FSQ-only)** | **127,148,453** |
+
+### Interpretation
+
+- **Each matched Overture absorbed ~1.48 FSQ entries on average** (48 M FSQ / 32.5 M Overture). FSQ duplicates the same physical place across coordinate-shifted records (mall vs storefront, indoor vs sidewalk geocode), which collapse to one Overture record.
+- **+52 M net new POIs from FSQ** — the merged universe is **68 % larger than Overture alone** (127 M vs 75 M), confirming the geographic complementarity hypothesis (Asia, LatAm, Eastern Europe).
+- **Match tier distribution** is in `outputs/dedup_fsq_decisions.parquet` — `confident` (name_sim ≥ 0.85), `probable` (≥ 0.6), `weak` (< 0.6). For vocab purposes only `confident` + `probable` are treated as same-place; `weak` matches are kept as Foursquare unique.
+
+### Artefacts
+
+- `outputs/dedup_pairs.parquet` — 26.7 GB, 1.44 B raw candidate pairs (kept for re-tier experiments)
+- `outputs/dedup_fsq_decisions.parquet` — 7.9 GB, one row per FSQ place with its best Overture match + tier
+- `outputs/dedup_summary.csv` — headline counts above
+
 ## Next concrete actions (priority order)
 
-1. **Spatial-dedup Overture ∪ Foursquare** — KNN join by (lat, lon) within 50 m, then fuzzy name + category overlap. Produces a master POI table with `(primary_source, secondary_source, unified_category)` per row.
-2. **Overture Bridge Files for OSM** — pull `s3://overturemaps-us-west-2/bridgefiles/2026-04-15.0/dataset=osm/` and join to the OSM planet PBF's `building=*`, `shop=*`, `amenity=*` tags to recover semantic labels for Overture buildings.
-3. **Optional per-region OpenAddresses integration** — if we want street-number-level tokens for US/EU slices later, run `07_oa_inspect.py` variants + CSV → Parquet conversion per country.
+1. ~~**Spatial-dedup Overture ∪ Foursquare**~~ — done 2026-04-29 (above).
+2. **Build the unified POI master table.** Outer-join Overture + `dedup_fsq_decisions` to materialize one row per merged place: `(merged_id, ovt_id?, fsq_id?, lat, lon, primary_category_overture, primary_category_fsq, source_set)`. ~127 M rows.
+3. **Re-derive the POI vocab on the merged universe.** Re-run frequency passes on the unified categories; FSQ's hierarchical taxonomy (`Dining > Cafe > Café`) gives the `top11/level2/level3` cascaded vocab (vs Overture's flat 690-keep tail). Update `VOCAB_ANALYSIS.md`.
+4. **Overture Bridge Files for OSM** — pull `s3://overturemaps-us-west-2/bridgefiles/2026-04-15.0/dataset=osm/` and join to the OSM planet PBF's `building=*`, `shop=*`, `amenity=*` tags to recover semantic labels for the 94 % null Overture buildings.
+5. **Optional per-region OpenAddresses integration** — if street-number-level tokens are wanted for US/EU slices, run `07_oa_inspect.py` variants + CSV → Parquet conversion per country.
 
 ## Files produced in this pass
 
@@ -118,5 +152,8 @@ Concrete **complementarity**: Foursquare adds roughly 25–40 M POIs in Indonesi
 - `outputs/fsq_freq_fsq_category_ids.csv` — 1 661 category IDs (some duplicates across labels)
 - `outputs/fsq_freq_is_closed.csv` — open vs closed counts
 - `outputs/oa_country_summary.csv` — 62 countries × source-file-count × byte-size
+- `outputs/dedup_pairs.parquet` (Leonardo only) — 26.7 GB raw candidate pairs
+- `outputs/dedup_fsq_decisions.parquet` (Leonardo only) — 7.9 GB FSQ-side dedup decisions
+- `outputs/dedup_summary.csv` — Overture ∪ FSQ headline counts
 - `schema/fsq_places.txt` — full FSQ Places Parquet schema (28 columns)
 - `schema/openaddresses_csv.txt` — OpenAddresses CSV schema sample

@@ -1,0 +1,8 @@
+metric,value
+total_overture_places,75495994
+total_fsq_places,99904729
+matched_fsq_to_ovt,48252270
+unmatched_fsq_only,51652459
+overture_with_match,32559028
+overture_only,42936966
+merged_universe_size,127148453
