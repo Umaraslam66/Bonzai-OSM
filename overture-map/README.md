@@ -13,9 +13,11 @@ overture-map/
 ├── requirements.txt             — duckdb, pandas, matplotlib, pyarrow, requests
 │
 ├── docs/
+│   ├── FINDINGS.md              — *START HERE* — full text-based report of findings
 │   ├── VOCAB_ANALYSIS.md        — per-field vocab recommendations (auto-regenerated)
 │   ├── DATA_SOURCES.md          — external POI/building/address datasets we considered
-│   └── MULTI_SOURCE_ANALYSIS.md — Overture + Foursquare + OpenAddresses + dedup outcome
+│   ├── MULTI_SOURCE_ANALYSIS.md — Overture + Foursquare + OpenAddresses + dedup outcome
+│   └── HANDOFF.md               — one-page brief for the next session
 │
 ├── scripts/
 │   ├── common.py                — release pin, S3 config, DuckDB bootstrap
@@ -26,6 +28,9 @@ overture-map/
 │   ├── 06_fsq_freq_pass.py     — frequency scan on local FSQ parquet
 │   ├── 07_oa_inspect.py         — walk OA zip, per-country summary without extraction
 │   ├── 08_dedup_places.py       — Overture ∪ Foursquare spatial+name dedup
+│   ├── 09_build_master.py       — unified POI master table from dedup decisions
+│   ├── 10_dedup_qa.py           — sanity checks on dedup quality
+│   ├── 11_source_dominance.py   — 0.5° grid Ovt-vs-FSQ dominance
 │   ├── inventory.py             — pretty-print schema + freq inventory
 │   └── analyze.py               — read CSVs, write VOCAB_ANALYSIS.md
 │

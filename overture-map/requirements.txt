@@ -4,8 +4,3 @@ matplotlib
 pyarrow
 requests
 huggingface_hub>=0.25
-plotly>=5.20
-pillow>=10
-folium>=0.17
-branca>=0.7
-pydeck>=0.9

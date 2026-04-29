@@ -118,7 +118,12 @@ cd ~/Documents/dynamo/Bonzai-OSM/overture-map
 
 ## Recommended first move
 
-Read `docs/MULTI_SOURCE_ANALYSIS.md` end-to-end (especially the
-"Dedup outcome" and "Next concrete actions" sections). Then start on
-Step 1 (`09_build_master.py`) — submit it to `boost_usr_prod` from the
-beginning; don't try the login node for joins of this size.
+Read [`docs/FINDINGS.md`](docs/FINDINGS.md) end-to-end — it's the full
+text report covering inputs, methodology, vocab analysis, dedup
+results, dedup QA, source dominance, and concrete vocab
+recommendations. Everything else in `docs/` is supporting detail.
+
+Then start on the next step (frequency passes on the merged universe →
+re-derive POI vocab on FSQ hierarchical taxonomy). Run any heavy
+DuckDB join on `boost_usr_prod`; the login node OOM-kills on anything
+sorting more than ~100 M rows or hash-joining > ~1 B intermediates.
