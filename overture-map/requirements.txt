@@ -4,3 +4,4 @@ matplotlib
 pyarrow
 requests
 huggingface_hub>=0.25
+plotly>=5.20
