@@ -1,42 +1,32 @@
-"""Render outputs/source_dominance_grid.csv as world maps.
+"""Render outputs/source_dominance_grid.csv as interactive zoomable maps.
 
-Produces:
-  - outputs/source_dominance_map.png       static, log2(Ovt/FSQ) diverging
-  - outputs/source_density_overture.png    static, Overture density (log)
-  - outputs/source_density_foursquare.png  static, Foursquare density (log)
-  - outputs/source_dominance_map.html      interactive Plotly raster heatmap
+Outputs:
+  - outputs/dominance_map.html   colored grid cells, log2(Ovt/FSQ)
+  - outputs/density_map.html     heatmap of total POI density
+  - outputs/dominance_compare.html  Ovt + FSQ side-by-side toggle
 
-Uses matplotlib + plotly.imshow (raster, not vector), so 80 k cells
-render in a fraction of a second instead of grinding through individual
-SVG markers.
+Uses Plotly density_mapbox / scattermapbox so the rendering is WebGL,
+basemap is OpenStreetMap tiles (no API key), and zoom/pan/hover work
+smoothly even with tens of thousands of cells.
 
 Run locally on the Mac after rsyncing the CSV from Leonardo:
     .venv/bin/python scripts/12_render_dominance_map.py
 """
 from __future__ import annotations
 from pathlib import Path
+import math
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm, LogNorm
+import plotly.graph_objects as go
 
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 GRID_CSV = OUTPUTS / "source_dominance_grid.csv"
 
-# 0.5° grid → 360 × 720 raster
-GRID = 2
-NLAT = 180 * GRID
-NLON = 360 * GRID
-LAT_OFFSET = 90 * GRID
-LON_OFFSET = 180 * GRID
-EXTENT = [-180.0, 180.0, -90.0, 90.0]
-
-
 if not GRID_CSV.exists():
     raise SystemExit(
-        f"missing {GRID_CSV} — rsync it from Leonardo first:\n"
+        f"missing {GRID_CSV} — rsync from Leonardo first:\n"
         "  rsync -az uaslam00@login.leonardo.cineca.it:"
         "/leonardo_work/AIFAC_P02_222/overture-map/outputs/"
         "source_dominance_grid.csv overture-map/outputs/"
@@ -47,138 +37,163 @@ df = pd.read_csv(GRID_CSV)
 print(f"[load] {len(df):,} populated cells")
 
 
-def to_raster(df: pd.DataFrame, col: str) -> np.ndarray:
-    """Pivot the long CSV into a (NLAT × NLON) raster, NaN where no cell."""
-    arr = np.full((NLAT, NLON), np.nan, dtype=np.float64)
-    iy = (df["gy"].to_numpy() + LAT_OFFSET).astype(np.int32)
-    ix = (df["gx"].to_numpy() + LON_OFFSET).astype(np.int32)
-    valid = (iy >= 0) & (iy < NLAT) & (ix >= 0) & (ix < NLON)
-    arr[iy[valid], ix[valid]] = df[col].to_numpy()[valid]
-    return arr
+# ----- shared map config ------------------------------------------------
+
+# Open-street-map style — no API key, real country borders + city names.
+MAPBOX_STYLE = "open-street-map"
+INITIAL_CENTER = dict(lat=20, lon=10)
+INITIAL_ZOOM = 1.5
 
 
-def render_dominance_png(df: pd.DataFrame, out: Path) -> None:
-    n_ovt = to_raster(df, "n_ovt")
-    n_fsq = to_raster(df, "n_fsq")
-    # log2 ratio with +1 smoothing; mask cells where both empty
-    ratio = np.log2((np.nan_to_num(n_ovt) + 1.0) / (np.nan_to_num(n_fsq) + 1.0))
-    empty = np.isnan(n_ovt) & np.isnan(n_fsq)
-    ratio[empty] = np.nan
-
-    fig, ax = plt.subplots(figsize=(20, 10), dpi=110)
-    fig.patch.set_facecolor("#0a0a0a")
-    ax.set_facecolor("#0a0a0a")
-    norm = TwoSlopeNorm(vcenter=0.0, vmin=-5.0, vmax=5.0)
-    im = ax.imshow(
-        np.flipud(ratio),
-        cmap="RdBu_r",
-        norm=norm,
-        extent=EXTENT,
-        interpolation="nearest",
-    )
-    ax.set_xlabel("longitude", color="#ddd")
-    ax.set_ylabel("latitude", color="#ddd")
-    ax.tick_params(colors="#aaa")
-    for spine in ax.spines.values():
-        spine.set_color("#444")
-    ax.set_title(
-        "Overture vs Foursquare — POI source dominance "
-        "(log₂(Ovt/FSQ), 0.5° grid)",
-        color="#ddd",
-        fontsize=14,
-        pad=12,
-    )
-    cbar = plt.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-    cbar.set_ticks([-5, -2, 0, 2, 5])
-    cbar.set_ticklabels(
-        ["FSQ ≥32×", "FSQ 4×", "balanced", "Ovt 4×", "Ovt ≥32×"]
-    )
-    cbar.ax.tick_params(colors="#ddd")
-    cbar.outline.set_edgecolor("#444")
-    plt.tight_layout()
-    plt.savefig(out, facecolor=fig.get_facecolor(), dpi=110, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[png ] {out}  ({out.stat().st_size / 1e6:.1f} MB)")
-
-
-def render_density_png(df: pd.DataFrame, col: str, label: str, out: Path) -> None:
-    arr = to_raster(df, col)
-    fig, ax = plt.subplots(figsize=(20, 10), dpi=110)
-    fig.patch.set_facecolor("#0a0a0a")
-    ax.set_facecolor("#0a0a0a")
-    norm = LogNorm(vmin=1, vmax=max(np.nanmax(arr), 10))
-    im = ax.imshow(
-        np.flipud(arr),
-        cmap="viridis",
-        norm=norm,
-        extent=EXTENT,
-        interpolation="nearest",
-    )
-    ax.set_xlabel("longitude", color="#ddd")
-    ax.set_ylabel("latitude", color="#ddd")
-    ax.tick_params(colors="#aaa")
-    for spine in ax.spines.values():
-        spine.set_color("#444")
-    ax.set_title(
-        f"{label} POI density (log scale, 0.5° grid)",
-        color="#ddd",
-        fontsize=14,
-        pad=12,
-    )
-    cbar = plt.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-    cbar.set_label(f"{label} places per cell", color="#ddd")
-    cbar.ax.tick_params(colors="#ddd")
-    cbar.outline.set_edgecolor("#444")
-    plt.tight_layout()
-    plt.savefig(out, facecolor=fig.get_facecolor(), dpi=110, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[png ] {out}  ({out.stat().st_size / 1e6:.1f} MB)")
-
-
-def render_dominance_html(df: pd.DataFrame, out: Path) -> None:
-    """Interactive Plotly raster heatmap — single image in HTML, fast.
-
-    Uses plotly.express.imshow which renders the whole grid as one
-    raster image, not 80 k SVG markers.  Hover gives lat/lon and value.
-    """
-    import plotly.express as px
-
-    n_ovt = to_raster(df, "n_ovt")
-    n_fsq = to_raster(df, "n_fsq")
-    ratio = np.log2((np.nan_to_num(n_ovt) + 1.0) / (np.nan_to_num(n_fsq) + 1.0))
-    empty = np.isnan(n_ovt) & np.isnan(n_fsq)
-    ratio[empty] = np.nan
-
-    fig = px.imshow(
-        np.flipud(ratio),
-        x=np.linspace(-180, 180, NLON),
-        y=np.linspace(90, -90, NLAT),
-        color_continuous_scale="RdBu_r",
-        color_continuous_midpoint=0,
-        zmin=-5,
-        zmax=5,
-        origin="upper",
-        labels=dict(x="longitude", y="latitude", color="log₂(O/F)"),
-        title="Overture vs Foursquare — POI source dominance (0.5° grid)",
-    )
-    fig.update_layout(
-        height=720,
-        margin=dict(l=20, r=20, t=60, b=20),
+def common_layout(title: str) -> dict:
+    return dict(
+        title=dict(text=title, x=0.5, font=dict(size=16, color="#eee")),
+        height=780,
+        margin=dict(l=0, r=0, t=50, b=0),
         paper_bgcolor="#0a0a0a",
-        plot_bgcolor="#0a0a0a",
         font=dict(color="#ddd"),
+        mapbox=dict(
+            style=MAPBOX_STYLE,
+            center=INITIAL_CENTER,
+            zoom=INITIAL_ZOOM,
+        ),
     )
-    fig.update_xaxes(gridcolor="#333", zerolinecolor="#444")
-    fig.update_yaxes(gridcolor="#333", zerolinecolor="#444", scaleanchor="x", scaleratio=1)
+
+
+# ----- map 1: dominance ------------------------------------------------
+
+def render_dominance_map(df: pd.DataFrame, out: Path) -> None:
+    # Filter to cells with meaningful count — cells with <50 places are
+    # noise (single villages, ferry terminals, etc.) and clutter the view.
+    d = df[df["n_total"] >= 50].copy()
+    print(f"[dom ] showing {len(d):,} cells with ≥50 places "
+          f"({100 * len(d) / len(df):.0f}% of populated)")
+
+    d["log2_clipped"] = d["log2_ratio"].clip(-5, 5)
+    # Marker size scaled by log10(places) — caps so megacells don't dominate
+    d["size"] = d["n_total"].apply(lambda n: max(4, min(28, math.log10(n) * 5)))
+    d["hover"] = (
+        "Overture: " + d["n_ovt"].map("{:,}".format)
+        + "<br>Foursquare: " + d["n_fsq"].map("{:,}".format)
+        + "<br>log₂(O/F): " + d["log2_ratio"].map("{:+.2f}".format)
+        + "<br>country: " + d["country"].fillna("—")
+    )
+
+    fig = go.Figure(
+        data=go.Scattermapbox(
+            lat=d["lat_center"],
+            lon=d["lon_center"],
+            mode="markers",
+            marker=dict(
+                size=d["size"],
+                color=d["log2_clipped"],
+                colorscale="RdBu_r",
+                cmin=-5,
+                cmax=5,
+                opacity=0.75,
+                colorbar=dict(
+                    title=dict(text="log₂(O/F)", font=dict(color="#ddd")),
+                    tickvals=[-5, -2, 0, 2, 5],
+                    ticktext=["FSQ ≥32×", "FSQ 4×", "balanced", "Ovt 4×", "Ovt ≥32×"],
+                    tickfont=dict(color="#ddd"),
+                    bgcolor="#222",
+                    bordercolor="#444",
+                    x=0.99,
+                    xanchor="right",
+                ),
+            ),
+            text=d["hover"],
+            hoverinfo="text",
+        )
+    )
+    fig.update_layout(**common_layout(
+        "Overture vs Foursquare — POI source dominance (0.5° grid)"
+    ))
     fig.write_html(out, include_plotlyjs="cdn")
-    print(f"[html] {out}  ({out.stat().st_size / 1e6:.1f} MB)")
+    print(f"[dom ] {out}  ({out.stat().st_size / 1e6:.1f} MB)")
+
+
+# ----- map 2: total density (heatmap) ---------------------------------
+
+def render_density_heatmap(df: pd.DataFrame, out: Path) -> None:
+    d = df[df["n_total"] >= 10].copy()
+    print(f"[dens] showing {len(d):,} cells with ≥10 places")
+
+    fig = go.Figure(
+        data=go.Densitymapbox(
+            lat=d["lat_center"],
+            lon=d["lon_center"],
+            z=np.log10(d["n_total"]),
+            radius=10,
+            colorscale="Inferno",
+            colorbar=dict(
+                title=dict(text="log₁₀ places", font=dict(color="#ddd")),
+                tickfont=dict(color="#ddd"),
+                bgcolor="#222",
+                bordercolor="#444",
+                x=0.99,
+                xanchor="right",
+            ),
+            opacity=0.85,
+        )
+    )
+    fig.update_layout(**common_layout(
+        "POI density — combined Overture + Foursquare (0.5° grid)"
+    ))
+    fig.write_html(out, include_plotlyjs="cdn")
+    print(f"[dens] {out}  ({out.stat().st_size / 1e6:.1f} MB)")
+
+
+# ----- map 3: side-by-side (toggle layers) -----------------------------
+
+def render_compare_map(df: pd.DataFrame, out: Path) -> None:
+    # One map with TWO toggleable trace layers — Overture vs Foursquare.
+    # User clicks legend to flip between sources for visual comparison.
+    d_ovt = df[df["n_ovt"] >= 10].copy()
+    d_fsq = df[df["n_fsq"] >= 10].copy()
+    print(f"[cmp ] Ovt cells: {len(d_ovt):,}, FSQ cells: {len(d_fsq):,}")
+
+    def layer(d: pd.DataFrame, col: str, name: str, scale: str) -> go.Densitymapbox:
+        return go.Densitymapbox(
+            name=name,
+            lat=d["lat_center"],
+            lon=d["lon_center"],
+            z=np.log10(d[col]),
+            radius=10,
+            colorscale=scale,
+            opacity=0.85,
+            showscale=False,
+            hovertemplate=f"{name}<br>%{{z:.2f}} log₁₀ places<extra></extra>",
+        )
+
+    fig = go.Figure()
+    fig.add_trace(layer(d_ovt, "n_ovt", "Overture",   "Blues"))
+    fig.add_trace(layer(d_fsq, "n_fsq", "Foursquare", "Reds"))
+    # Default: show only Overture; user toggles via legend
+    fig.data[1].visible = "legendonly"
+    fig.update_layout(
+        **common_layout("Overture (Blue) vs Foursquare (Red) — toggle in legend"),
+        showlegend=True,
+        legend=dict(
+            x=0.01,
+            y=0.99,
+            xanchor="left",
+            yanchor="top",
+            bgcolor="rgba(20,20,20,0.85)",
+            font=dict(color="#ddd", size=13),
+            bordercolor="#444",
+            borderwidth=1,
+        ),
+    )
+    fig.write_html(out, include_plotlyjs="cdn")
+    print(f"[cmp ] {out}  ({out.stat().st_size / 1e6:.1f} MB)")
 
 
 def main() -> None:
-    render_dominance_png(df, OUTPUTS / "source_dominance_map.png")
-    render_density_png(df, "n_ovt", "Overture", OUTPUTS / "source_density_overture.png")
-    render_density_png(df, "n_fsq", "Foursquare", OUTPUTS / "source_density_foursquare.png")
-    render_dominance_html(df, OUTPUTS / "source_dominance_map.html")
+    render_dominance_map(df,    OUTPUTS / "dominance_map.html")
+    render_density_heatmap(df,  OUTPUTS / "density_map.html")
+    render_compare_map(df,      OUTPUTS / "dominance_compare.html")
+    print("\nopen any of the .html files in your browser — pan/zoom/hover.")
 
 
 if __name__ == "__main__":
