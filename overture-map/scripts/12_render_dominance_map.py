@@ -1,29 +1,30 @@
 """Single overlay map — Overture (blue) vs Foursquare (red).
 
-The story we want the picture to tell, in one glance:
-  - Overture is wide  → dim blue covers continental interiors (rural OSM)
-  - Foursquare is deep → bright red dots concentrate in cities globally
-  - Where both have data  → purple/magenta blend
-  - Where neither has data → basemap shows through (transparent)
+Vector approach: every populated 0.5° cell becomes a real GeoJSON
+Polygon coloured by source mix.  Vector data reprojects correctly into
+Leaflet's Web Mercator (no equirectangular-vs-Mercator stretching),
+stays crisp at every zoom level, and is anchored to actual lat/lon
+coordinates — so cells fall on the right country, not in the ocean.
 
-Approach:
-  1. Pivot the 0.5° dominance grid into a 360×720 RGBA raster where the
-     red channel = log scaled FSQ count and the blue channel = log scaled
-     Ovt count.  Real pixel blending — equal counts produce proper purple.
-  2. Save the raster as PNG.
-  3. Drop the PNG onto an OSM basemap as a Folium ImageOverlay (Leaflet,
-     robust raster handling).
+Color encoding per cell:
+  - red channel  ∝ log10(FSQ count)   (Foursquare strength)
+  - blue channel ∝ log10(Ovt count)   (Overture strength)
+  - alpha        ∝ max of the two     (POI density saturation)
+
+  → Pure-FSQ cell = red.  Pure-Ovt cell = blue.  Both = purple.
+  → Bright = lots of places.  Dim = a handful.
+
+Filter: cells with ≥50 places only — drops single-village noise.
 
 Run locally on the Mac:
     .venv/bin/python scripts/12_render_dominance_map.py
 """
 from __future__ import annotations
+import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from PIL import Image
 import folium
-from folium.raster_layers import ImageOverlay
 from branca.element import Template, MacroElement
 
 
@@ -31,19 +32,14 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 GRID_CSV = OUTPUTS / "source_dominance_grid.csv"
 OUT_HTML = OUTPUTS / "source_overlay_map.html"
-OUT_PNG = OUTPUTS / "source_overlay_raster.png"
 
-# 0.5° grid → 360 × 720 raster
-GRID = 2
-NLAT = 180 * GRID  # 360
-NLON = 360 * GRID  # 720
-LAT_OFFSET = 90 * GRID
-LON_OFFSET = 180 * GRID
+CELL_SIZE = 0.5  # 0.5° grid
 
-# Saturate at 10^5 places per cell — cells with more than that become
-# fully bright (Manhattan, central Tokyo).  Below 10 → near-invisible.
+# Saturate at 10^5 places per cell — cells with more become fully bright
+# (Manhattan, central Tokyo).  Below ~10 → near-invisible.
 LOG_MIN = 1.0
 LOG_MAX = 5.0
+MIN_PLACES = 50  # drop noise cells
 
 
 if not GRID_CSV.exists():
@@ -56,65 +52,103 @@ if not GRID_CSV.exists():
 
 print(f"[load] {GRID_CSV}")
 df = pd.read_csv(GRID_CSV, low_memory=False)
-print(f"[load] {len(df):,} cells in the 0.5° grid")
+print(f"[load] {len(df):,} cells")
+
+df = df[df["n_total"] >= MIN_PLACES].copy()
+print(f"[filt] {len(df):,} cells with ≥{MIN_PLACES} places")
 
 
-# -------- 1. Build the RGBA raster ----------------------------------
+# -------- 1. Compute per-cell colour --------------------------------
 
 def normalize(arr: np.ndarray) -> np.ndarray:
-    """log10(n+1), clipped to [LOG_MIN, LOG_MAX], scaled to [0, 1]."""
     v = np.log10(arr + 1.0)
     return ((v - LOG_MIN) / (LOG_MAX - LOG_MIN)).clip(0.0, 1.0)
 
 
-ovt_arr = np.zeros((NLAT, NLON), dtype=np.float64)
-fsq_arr = np.zeros((NLAT, NLON), dtype=np.float64)
-iy = (df["gy"].to_numpy() + LAT_OFFSET).astype(np.int32)
-ix = (df["gx"].to_numpy() + LON_OFFSET).astype(np.int32)
-valid = (iy >= 0) & (iy < NLAT) & (ix >= 0) & (ix < NLON)
-ovt_arr[iy[valid], ix[valid]] = df["n_ovt"].to_numpy()[valid]
-fsq_arr[iy[valid], ix[valid]] = df["n_fsq"].to_numpy()[valid]
+ovt_n = normalize(df["n_ovt"].to_numpy())
+fsq_n = normalize(df["n_fsq"].to_numpy())
 
-ovt_n = normalize(ovt_arr)
-fsq_n = normalize(fsq_arr)
+# RGB blend
+r = (fsq_n * 255).astype(int)
+g = (np.minimum(fsq_n, ovt_n) * 50).astype(int)   # tiny green hint when both
+b = (ovt_n * 255).astype(int)
+alpha = (np.maximum(ovt_n, fsq_n) ** 0.6) * 0.85   # γ-correct, cap below 1
 
-rgba = np.zeros((NLAT, NLON, 4), dtype=np.uint8)
-rgba[..., 0] = (fsq_n * 255).astype(np.uint8)              # red   = FSQ
-rgba[..., 1] = (np.minimum(fsq_n, ovt_n) * 60).astype(np.uint8)  # green hint where both
-rgba[..., 2] = (ovt_n * 255).astype(np.uint8)              # blue  = Ovt
-alpha = np.maximum(ovt_n, fsq_n) ** 0.6                    # γ-correct
-rgba[..., 3] = (alpha * 220).astype(np.uint8)
-
-# Flip — image origin top-left, geographic origin bottom-left
-rgba = np.flipud(rgba)
-
-img = Image.fromarray(rgba, mode="RGBA")
-# Upscale 4× with nearest-neighbour so cell borders are crisp at zoom-out
-img = img.resize((NLON * 4, NLAT * 4), Image.NEAREST)
-img.save(OUT_PNG)
-print(f"[png ] {OUT_PNG}  ({OUT_PNG.stat().st_size / 1e3:.0f} KB, "
-      f"{img.size[0]}×{img.size[1]})")
+df["fill"] = [
+    f"#{r[i]:02x}{g[i]:02x}{b[i]:02x}" for i in range(len(df))
+]
+df["alpha"] = alpha
 
 
-# -------- 2. Folium map with ImageOverlay -----------------------------
+# -------- 2. Build GeoJSON FeatureCollection ------------------------
+
+half = CELL_SIZE / 2
+features = []
+for _, row in df.iterrows():
+    lat = row["lat_center"]
+    lon = row["lon_center"]
+    feat = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+                [lon - half, lat - half],
+                [lon + half, lat - half],
+                [lon + half, lat + half],
+                [lon - half, lat + half],
+                [lon - half, lat - half],
+            ]],
+        },
+        "properties": {
+            "fill": row["fill"],
+            "alpha": float(row["alpha"]),
+            "n_ovt": int(row["n_ovt"]),
+            "n_fsq": int(row["n_fsq"]),
+            "country": str(row["country"]) if pd.notna(row["country"]) else "—",
+        },
+    }
+    features.append(feat)
+
+gj = {"type": "FeatureCollection", "features": features}
+print(f"[geojson] {len(features):,} polygons "
+      f"(~{len(json.dumps(gj)) / 1e6:.1f} MB)")
+
+
+# -------- 3. Folium map with GeoJson layer --------------------------
 
 m = folium.Map(
     location=[20, 10],
     zoom_start=2,
-    tiles="cartodbdark_matter",  # dark basemap so red/blue pop
+    tiles="cartodbdark_matter",
     world_copy_jump=True,
+    prefer_canvas=True,   # canvas renderer scales better than SVG for many polygons
 )
 
-ImageOverlay(
-    image=str(OUT_PNG),
-    bounds=[[-90, -180], [90, 180]],   # [[south, west], [north, east]]
-    opacity=0.85,
-    interactive=False,
-    cross_origin=False,
-    zindex=1,
+def style_fn(feat):
+    return {
+        "fillColor": feat["properties"]["fill"],
+        "color": feat["properties"]["fill"],
+        "weight": 0,
+        "fillOpacity": feat["properties"]["alpha"],
+    }
+
+def highlight_fn(_):
+    return {"weight": 1, "color": "#fff", "fillOpacity": 0.95}
+
+folium.GeoJson(
+    gj,
+    name="POI dominance",
+    style_function=style_fn,
+    highlight_function=highlight_fn,
+    tooltip=folium.GeoJsonTooltip(
+        fields=["country", "n_ovt", "n_fsq"],
+        aliases=["country", "Overture", "Foursquare"],
+        sticky=True,
+    ),
 ).add_to(m)
 
-# Title + legend HTML overlay
+
+# Title + legend overlay
 legend_html = """
 {% macro html(this, kwargs) %}
 <div style="
@@ -127,7 +161,8 @@ legend_html = """
 ">
   <b>Overture (blue) vs Foursquare (red) — wide vs deep</b><br>
   <span style="font-size:12px;color:#aaa">
-    blue saturation = Overture density · red = Foursquare · purple = both
+    blue saturation = Overture density · red = Foursquare · purple = both ·
+    hover for counts
   </span>
 </div>
 <div style="
@@ -157,5 +192,5 @@ macro._template = Template(legend_html)
 m.get_root().add_child(macro)
 
 m.save(str(OUT_HTML))
-print(f"[html] {OUT_HTML}  ({OUT_HTML.stat().st_size / 1e3:.0f} KB)")
-print("\nopen in browser — Folium/Leaflet image overlay on dark CartoDB basemap.")
+print(f"[html] {OUT_HTML}  ({OUT_HTML.stat().st_size / 1e6:.1f} MB)")
+print("\nopen in browser — vector polygons, crisp at any zoom.")
