@@ -122,7 +122,7 @@ def compute(con: duckdb.DuckDBPyConnection) -> None:
                   SUM(count(*)) OVER (), 1)       AS cells_pct,
             ROUND(100.0 * sum(n_total) /
                   SUM(sum(n_total)) OVER (), 1)   AS places_pct
-        FROM read_parquet('{out}')
+        FROM read_csv_auto('{out}')
         GROUP BY 1
         ORDER BY 1
         """
@@ -134,7 +134,7 @@ def compute(con: duckdb.DuckDBPyConnection) -> None:
         f"""
         SELECT lat_center, lon_center, country, n_ovt, n_fsq,
                ROUND(log2_ratio, 2) AS log2_ratio
-        FROM read_parquet('{out}')
+        FROM read_csv_auto('{out}')
         ORDER BY n_total DESC LIMIT 15
         """
     ).fetchdf()
