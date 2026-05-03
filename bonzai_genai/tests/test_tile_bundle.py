@@ -36,7 +36,11 @@ def test_bundle_construction_validates_shape():
     assert bundle.raster.shape == (NUM_CHANNELS, RASTER_PX, RASTER_PX)
 
     with pytest.raises(ValueError):
-        TileBundle(raster=np.zeros((1, 1, 1), dtype=np.float32), tokens=[], metadata=bundle.metadata)
+        TileBundle(
+            raster=np.zeros((1, 1, 1), dtype=np.float32),
+            tokens=[],
+            metadata=bundle.metadata,
+        )
 
 
 def test_metadata_to_json_roundtrip():

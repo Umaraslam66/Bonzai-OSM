@@ -30,7 +30,7 @@ class TileMetadata:
         return json.dumps(asdict(self), separators=(",", ":"))
 
     @classmethod
-    def from_json(cls, s: str | bytes) -> "TileMetadata":
+    def from_json(cls, s: str | bytes) -> TileMetadata:
         if isinstance(s, bytes):
             s = s.decode("utf-8")
         data = json.loads(s)
@@ -62,7 +62,7 @@ class TileBundle:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, bytes]) -> "TileBundle":
+    def from_dict(cls, d: dict[str, bytes]) -> TileBundle:
         raster = np.load(io.BytesIO(d["raster.npy"]))
         tokens = json.loads(d["tokens.json"].decode())
         metadata = TileMetadata.from_json(d["metadata.json"].decode())

@@ -25,10 +25,10 @@ console = Console()
 
 @app.command("synthetic")
 def cmd_synthetic(
-    output: Path = typer.Option(..., "-o", "--output", help="Output directory for shards"),
-    n: int = typer.Option(100, "-n", help="Number of synthetic tiles"),
-    shard_size: int = typer.Option(50, "--shard-size"),
-    seed_base: int = typer.Option(0, "--seed-base"),
+    output: Path = typer.Option(..., "-o", "--output", help="Output directory for shards"),  # noqa: B008
+    n: int = typer.Option(100, "-n", help="Number of synthetic tiles"),  # noqa: B008
+    shard_size: int = typer.Option(50, "--shard-size"),  # noqa: B008
+    seed_base: int = typer.Option(0, "--seed-base"),  # noqa: B008
 ) -> None:
     """Generate n synthetic procedural tiles into WebDataset shards."""
     vocab = load_default_vocab()
@@ -54,16 +54,16 @@ def cmd_synthetic(
 
 @app.command("overture-region")
 def cmd_overture_region(
-    pbf: Path = typer.Option(..., help="Path to .osm.pbf file"),
-    sw_lat: float = typer.Option(..., help="SW corner latitude"),
-    sw_lon: float = typer.Option(..., help="SW corner longitude"),
-    ne_lat: float = typer.Option(..., help="NE corner latitude"),
-    ne_lon: float = typer.Option(..., help="NE corner longitude"),
-    output: Path = typer.Option(..., "-o", "--output"),
-    country: str = typer.Option("SG", "--country"),
-    koppen: str = typer.Option("Af", "--koppen"),
-    shard_size: int = typer.Option(100, "--shard-size"),
-    max_tiles: int = typer.Option(1000, "--max-tiles"),
+    pbf: Path = typer.Option(..., help="Path to .osm.pbf file"),  # noqa: B008
+    sw_lat: float = typer.Option(..., help="SW corner latitude"),  # noqa: B008
+    sw_lon: float = typer.Option(..., help="SW corner longitude"),  # noqa: B008
+    ne_lat: float = typer.Option(..., help="NE corner latitude"),  # noqa: B008
+    ne_lon: float = typer.Option(..., help="NE corner longitude"),  # noqa: B008
+    output: Path = typer.Option(..., "-o", "--output"),  # noqa: B008
+    country: str = typer.Option("SG", "--country"),  # noqa: B008
+    koppen: str = typer.Option("Af", "--koppen"),  # noqa: B008
+    shard_size: int = typer.Option(100, "--shard-size"),  # noqa: B008
+    max_tiles: int = typer.Option(1000, "--max-tiles"),  # noqa: B008
 ) -> None:
     """Generate tile bundles for every tile in (sw, ne) bbox from an OSM PBF.
 

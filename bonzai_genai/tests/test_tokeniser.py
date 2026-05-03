@@ -3,9 +3,9 @@ import pytest
 
 from bonzai_genai.vocab.attributes import load_default_vocab
 from bonzai_genai.vocab.tokeniser import (
+    POI,
     Building,
     LandPolygon,
-    POI,
     Road,
     TileGeometry,
     Tokeniser,
@@ -75,7 +75,10 @@ def test_layer_order_is_land_roads_buildings_pois(tokeniser):
     geom = TileGeometry(
         land=[LandPolygon("land_class=park", [(10, 10), (50, 10), (50, 50)])],
         roads=[Road("road_class=residential", [(0, 0), (100, 0)])],
-        buildings=[Building("building_class=residential", "height=10m", [(20, 20), (30, 20), (30, 30), (20, 30)])],
+        buildings=[Building(
+            "building_class=residential", "height=10m",
+            [(20, 20), (30, 20), (30, 30), (20, 30)],
+        )],
         pois=[POI("poi=cafe", (25, 25))],
     )
     tokens = tokeniser.encode(geom)
@@ -108,7 +111,10 @@ def test_unknown_attribute_raises(tokeniser):
 def test_roundtrip_simple_tile(tokeniser):
     """Encode → decode reproduces the input geometry up to quantisation."""
     geom = TileGeometry(
-        land=[LandPolygon("land_class=park", [(100.0, 100.0), (200.0, 100.0), (200.0, 200.0), (100.0, 200.0)])],
+        land=[LandPolygon(
+            "land_class=park",
+            [(100.0, 100.0), (200.0, 100.0), (200.0, 200.0), (100.0, 200.0)],
+        )],
         roads=[Road("road_class=residential", [(0.0, 50.0), (100.0, 50.0), (200.0, 50.0)])],
         buildings=[
             Building("building_class=residential", "height=10m",
@@ -125,7 +131,7 @@ def test_roundtrip_simple_tile(tokeniser):
     assert len(decoded.buildings) == 1
     assert len(decoded.pois) == 1
     # Coords match within quantisation tolerance (4 m)
-    for orig, got in zip(geom.land[0].vertices, decoded.land[0].vertices):
+    for orig, got in zip(geom.land[0].vertices, decoded.land[0].vertices, strict=False):
         assert abs(orig[0] - got[0]) < 4.0
         assert abs(orig[1] - got[1]) < 4.0
 

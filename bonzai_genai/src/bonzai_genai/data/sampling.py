@@ -16,9 +16,9 @@ from pathlib import Path
 
 from bonzai_genai.config import TILE_SIDE_M
 from bonzai_genai.vocab.tokeniser import (
+    POI,
     Building,
     LandPolygon,
-    POI,
     Road,
     TileGeometry,
 )
@@ -186,17 +186,19 @@ def extract_tile_geometry_from_osm(
             x, y = coords
             xy = _to_local(x, y, sw_lat, sw_lon, dlat, dlon)
             cls = None
+            amenity_to_poi = {
+                "cafe": "cafe",
+                "restaurant": "restaurant",
+                "bar": "bar",
+                "pharmacy": "pharmacy",
+                "school": "school",
+                "hospital": "hospital",
+                "bank": "bank",
+                "fuel": "gas_station",
+                "parking": "parking",
+            }
             if "amenity" in tags:
-                amenity = tags["amenity"]
-                if amenity == "cafe": cls = "cafe"
-                elif amenity == "restaurant": cls = "restaurant"
-                elif amenity == "bar": cls = "bar"
-                elif amenity == "pharmacy": cls = "pharmacy"
-                elif amenity == "school": cls = "school"
-                elif amenity == "hospital": cls = "hospital"
-                elif amenity == "bank": cls = "bank"
-                elif amenity == "fuel": cls = "gas_station"
-                elif amenity == "parking": cls = "parking"
+                cls = amenity_to_poi.get(tags["amenity"])
             if cls is not None:
                 geom.pois.append(POI(class_name=f"poi={cls}", point=xy))
 

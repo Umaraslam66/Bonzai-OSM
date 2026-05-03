@@ -4,9 +4,9 @@ import numpy as np
 from bonzai_genai.config import METRES_PER_PX, NUM_CHANNELS, RASTER_PX
 from bonzai_genai.data.rasteriser import rasterise
 from bonzai_genai.vocab.tokeniser import (
+    POI,
     Building,
     LandPolygon,
-    POI,
     Road,
     TileGeometry,
 )

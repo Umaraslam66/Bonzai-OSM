@@ -7,8 +7,8 @@ import random
 
 from bonzai_genai.config import TILE_SIDE_M
 from bonzai_genai.vocab.tokeniser import (
-    Building,
     POI,
+    Building,
     Road,
     TileGeometry,
 )

@@ -1,11 +1,11 @@
 """Tests for the global config constants."""
 from bonzai_genai.config import (
-    TILE_SIDE_M,
-    RASTER_PX,
-    METRES_PER_PX,
-    COORD_BINS,
-    NUM_CHANNELS,
     CHANNEL_NAMES,
+    COORD_BINS,
+    METRES_PER_PX,
+    NUM_CHANNELS,
+    RASTER_PX,
+    TILE_SIDE_M,
 )
 
 
