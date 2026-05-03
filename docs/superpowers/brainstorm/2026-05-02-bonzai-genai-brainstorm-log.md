@@ -432,7 +432,7 @@ and it's solvable at sample time (outpainting / overlap), so it doesn't
 constrain training.
 
 **Compute estimate at 2 km² (updated 2026-05-03):**
-- De-risking phase (Luxembourg): ~250 GPU-h
+- De-risking phase (Sweden + Singapore + Sri Lanka): ~250 GPU-h
 - Phase 1 production (Western Europe, ~150k tiles): ~2,500 GPU-h
 - Phase 2 production (planet-scale, ~500k tiles): ~5,000 GPU-h total
 - Ablations + retries: ~800 GPU-h
@@ -450,7 +450,7 @@ constrain training.
 - Training: ~50-100 epochs with hyperparameter sweep (was ~30)
 
 **Fallback to 0.5 km² triggered if:**
-- Stage B Luxembourg validation runs >50 GPU-h on 100 tiles (>10 % of estimated cost per 0.5 % of data)
+- Stage B small-country validation runs >50 GPU-h on 100 tiles (>10 % of estimated cost per 0.5 % of data)
 - Densest 5 % of tiles consistently overflow 8 k context
 - Validation shows Stage B fails to learn long-range token dependencies
 
@@ -659,10 +659,10 @@ Output: dashboard row `(total, %valid_buildings, %valid_roads, %overlap_free, %l
 
 ## 5e5. De-risking experiments  *(added 2026-05-03)*
 
-Four sequential experiments on Luxembourg-scale data, each with a
-specific risk and a clear go/no-go signal. **Total ~250 GPU-h, ~2
-weeks wall time.** All run in the de-risking phase before any
-production-scale compute.
+Four sequential experiments on the Sweden + Singapore + Sri Lanka
+de-risking tile dataset, each with a specific risk and a clear go/no-go
+signal. **Total ~250 GPU-h, ~2 weeks wall time.** All run in the
+de-risking phase before any production-scale compute.
 
 ### Experiment 0 — Smoke test on synthetic data
 - **Risk:** fundamental architecture / code bugs
@@ -671,18 +671,18 @@ production-scale compute.
 - **Go:** pipeline produces something coherent end-to-end
 - **No-go:** training diverges → code bug
 
-### Experiment 1 — Sketcher on real Luxembourg
-- **Risk:** does Stage A learn coherent multi-channel structure?
-- **Setup:** ~1k Luxembourg tiles, Stage A DiT ~200 M params
+### Experiment 1 — Sketcher on real data (Sweden + Singapore + Sri Lanka)
+- **Risk:** does Stage A learn coherent multi-channel structure across diverse climates and urban morphologies?
+- **Setup:** ~3k tiles balanced across all three countries, Stage A DiT ~200 M params
 - **Cost:** ~80 GPU-h, ~4 days
 - **Go:** roads in linear/branching patterns; conditional samples
   differ from unconditional; FID below random-crop baseline
 - **No-go:** disconnected road blobs, no learned exclusion of
   buildings from roads, conditioning ineffective
 
-### Experiment 2 — Inker on perfect input (Luxembourg)
+### Experiment 2 — Inker on perfect input (Sweden + Singapore + Sri Lanka)
 - **Risk:** can Stage B output geometrically valid GeoJSON?
-- **Setup:** ~1k Luxembourg ground-truth (raster, tokens) pairs,
+- **Setup:** ~3k ground-truth (raster, tokens) pairs from all three countries,
   Stage B ~300 M params, train on ground-truth raster only
 - **Cost:** ~120 GPU-h, ~5 days
 - **Go:** building Chamfer dist <5 m; ≥90 % non-self-intersecting;

@@ -160,7 +160,7 @@ The whole stratification is a DuckDB SQL query running free on `lrd_all_serial`.
 
 | Item | Estimate |
 |---|---|
-| Tiles for de-risking phase (Luxembourg + Iceland) | ~2,000 |
+| Tiles for de-risking phase (Sweden + Singapore + Sri Lanka) | ~5,000 |
 | Tiles for **Wave 1** (Western Europe — default production) | ~150,000 |
 | Tiles for **Wave 2** (planet-scale — extension) | ~500,000 |
 | Raster per tile | ~50–100 KB compressed |
@@ -487,7 +487,7 @@ Build on Mac and free Leonardo partition:
 #### Phase 0.5 — Real data prep on Leonardo (3 days, 0 GPU-h)
 
 On `lrd_all_serial` (free):
-- Generate Luxembourg + Iceland tile shards (~2,000 tiles).
+- Generate Sweden + Singapore + Sri Lanka tile shards (~3,000-5,000 tiles).
 - Validate raster encoding against ground-truth visualisations.
 - Validate vector tokenisation by round-tripping decode → re-rasterise → IoU check.
 
@@ -578,7 +578,7 @@ Chain via `--dependency=afterok` for multi-day training. Save checkpoints to `$W
 
 **Initial allowance:** 1,250 GPU-h (covers Phases 0–4 with ~150 GPU-h headroom — i.e., reaches the end of Stage A production training on Wave 1 data).
 **Production extension request to CINECA:** ~3,500 additional GPU-h after Phase 1 (de-risking) shows green and we want to complete Phase 5 (Stage B production) at full Wave 1 quality.
-**Fallback if extension delayed/denied:** stop after Phase 4 with a Stage-A-only artifact (still demoable as raster generation), or run Phase 5 with reduced Stage B model size on Wave 1 data. **Never** drop Wave 1 to Luxembourg-only — that's research, not a v1 result.
+**Fallback if extension delayed/denied:** stop after Phase 4 with a Stage-A-only artifact (still demoable as raster generation), or run Phase 5 with reduced Stage B model size on Wave 1 data. **Never** drop Wave 1 to single-country only — that's research, not a v1 result.
 
 ### 9.5 Distribution
 
@@ -588,7 +588,7 @@ Chain via `--dependency=afterok` for multi-day training. Save checkpoints to `$W
 
 ## 10. De-risking experiments
 
-Four sequential experiments on Luxembourg-scale data, total ~250 GPU-h, ~2 weeks wall time.
+Four sequential experiments on the Sweden + Singapore + Sri Lanka tile dataset, total ~250 GPU-h, ~2 weeks wall time.
 
 ### Experiment 0 — Architecture smoke test on synthetic data
 - **Risk addressed:** fundamental architecture / code bugs.
@@ -597,9 +597,9 @@ Four sequential experiments on Luxembourg-scale data, total ~250 GPU-h, ~2 weeks
 - **Go signal:** pipeline produces something coherent end-to-end.
 - **No-go signal:** training diverges → code bug; fix and re-run.
 
-### Experiment 1 — Sketcher on real Luxembourg
-- **Risk addressed:** does Stage A learn coherent multi-channel structure from real OSM data?
-- **Setup:** ~1,000 Luxembourg tiles, Stage A DiT ~200 M params (smaller than production for speed).
+### Experiment 1 — Sketcher on real data (Sweden + Singapore + Sri Lanka)
+- **Risk addressed:** does Stage A learn coherent multi-channel structure from real OSM data, *across diverse climates and urban morphologies*?
+- **Setup:** ~3,000 tiles drawn from all three countries (balanced), Stage A DiT ~200 M params (smaller than production for speed).
 - **Cost:** ~80 GPU-h, ~4 days wall.
 - **Go signals (all should pass):**
   - Per-channel IoU within target ranges.
@@ -609,9 +609,9 @@ Four sequential experiments on Luxembourg-scale data, total ~250 GPU-h, ~2 weeks
 - **No-go signals:** disconnected road blobs, no learned road/building exclusion, conditioning ineffective.
 - **Mitigation if fails:** simplify to 5-channel skeleton; redesign conditioning encoder.
 
-### Experiment 2 — Inker on perfect input (Luxembourg)
+### Experiment 2 — Inker on perfect input (Sweden + Singapore + Sri Lanka)
 - **Risk addressed:** can Stage B output geometrically valid GeoJSON?
-- **Setup:** ~1,000 Luxembourg ground-truth (raster, tokens) pairs, Stage B ~300 M params, train on ground-truth raster only.
+- **Setup:** ~3,000 ground-truth (raster, tokens) pairs from all three countries, Stage B ~300 M params, train on ground-truth raster only.
 - **Cost:** ~120 GPU-h, ~5 days wall.
 - **Go signals (all should pass):**
   - Building Chamfer < 5 m average.

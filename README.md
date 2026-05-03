@@ -1,55 +1,92 @@
-# Bonzai-OSM
+# Bonzai-OSM — Generative City Model
 
-World-scale OpenStreetMap ingestion and preprocessing for a generative "map LLM" workflow on CINECA Leonardo.
+A two-stage generative model that produces novel, geometrically valid, plausibly-real city layouts as **vector geometry** (roads, building footprints, points of interest, land use) from a text prompt.
 
-## Current Status
+## What this is
 
-- Project/account on Leonardo: `AIFAC_P02_222`
-- Budget on 2026-04-15: `14 / 40000` local core-hours consumed
-- Cleanup completed on 2026-04-15:
-  - `$WORK` reset to ~`1.4M`
-  - `$FAST` reset to `0k`
-- Planet download completed on 2026-04-15 via Leonardo datamover:
-  - file: `/leonardo_scratch/large/userexternal/uaslam00/osm/raw/planet-latest.osm.pbf`
-  - upstream snapshot resolved to: `planet-260406.osm.pbf`
-  - size: `92,239,256,545` bytes
-  - checksum: `planet-latest.osm.pbf: OK`
-- Available Leonardo modules currently confirmed:
-  - `gdal/3.8.5--gcc--12.2.0`
-  - `proj/9.2.1--gcc--12.2.0-spack0.22`
-  - no `osmium` module found so far
+**Stage A — the Sketcher** is a small DiT diffusion model that paints a 9-channel coloured raster of a 2 km² tile from a prompt.
 
-## Repo Layout
+**Stage B — the Inker** is an autoregressive transformer that traces the Sketcher's coloured raster into precise vector geometry: building polygons, road graphs with class labels, labelled POIs, land-use polygons.
 
-- [PROJECT.md](./PROJECT.md): project log, decisions, verified Leonardo state
-- [commands.md](./commands.md): copy-paste operational commands
-- [docs/LUXEMBOURG_TEST.md](./docs/LUXEMBOURG_TEST.md): complete analysis of the first validated regional test on Leonardo
-- [docs/LUXEMBOURG_FORMAT_BENCHMARK.md](./docs/LUXEMBOURG_FORMAT_BENCHMARK.md): benchmark plan for comparing full Luxembourg exports across formats
-- [scripts/leonardo_cleanup.sh](./scripts/leonardo_cleanup.sh): safe cleanup helper
-- [scripts/leonardo_download_planet.sh](./scripts/leonardo_download_planet.sh): datamover-based planet download helper
-- [scripts/osm_layer_summary.py](./scripts/osm_layer_summary.py): generate one JSON file with counts, properties, tag coverage, and sample features
-- [scripts/render_osm_summary_report.py](./scripts/render_osm_summary_report.py): render a compact markdown report from the JSON summary
-- [jobs/luxembourg_probe.sbatch](./jobs/luxembourg_probe.sbatch): free `lrd_all_serial` GDAL probe job
-- [jobs/luxembourg_summary_json.sbatch](./jobs/luxembourg_summary_json.sbatch): generate a Leonardo JSON summary of the Luxembourg extract
-- [jobs/luxembourg_summary_bundle.sbatch](./jobs/luxembourg_summary_bundle.sbatch): generate both the JSON summary and a human-readable markdown report
-- [jobs/luxembourg_full_geojson.sbatch](./jobs/luxembourg_full_geojson.sbatch): full Luxembourg export to per-layer GeoJSON
-- [jobs/luxembourg_full_gpkg.sbatch](./jobs/luxembourg_full_gpkg.sbatch): full Luxembourg export to multi-layer GeoPackage
-- [jobs/luxembourg_full_parquet.sbatch](./jobs/luxembourg_full_parquet.sbatch): full Luxembourg export to per-layer Parquet/GeoParquet
-- [jobs/luxembourg_full_geojsonseq.sbatch](./jobs/luxembourg_full_geojsonseq.sbatch): full Luxembourg export to per-layer GeoJSONSeq
-- [jobs/leonardo_osm_extract.sbatch](./jobs/leonardo_osm_extract.sbatch): future `osmium` extract template once `osmium` is installed or built
+Output: **GeoJSON**, dropped into Unity / Unreal / CARLA / Foretellix / any GIS tool.
 
-## Operational Rules
+The headline interaction:
 
-- Use `data.leonardo.cineca.it` for large downloads.
-- Keep raw `.osm.pbf` files on `$CINECA_SCRATCH`.
-- Use `lrd_all_serial` for preprocessing and extraction.
-- Do not use `dcgp_usr_prod` or `boost_usr_prod` for PBF download or light parsing.
-- Move durable outputs to `$WORK` only after they are stable and worth keeping.
+```
+generate_city(
+    prompt = "dense European commercial district, mid-rise, coastal",
+    area  = 4.2 km²,
+    conditioning = { terrain_DEM, coastline_mask, style_anchor, constraint_mask }  # all optional
+) → GeoJSON FeatureCollection
+```
 
-## Next Step
+## Status
 
-Prototype the parsing pipeline on a small Geofabrik extract such as Luxembourg or Iceland using GDAL on `lrd_all_serial`. Do not start full-planet custom extraction until the region probe succeeds or `osmium` is installed.
+**Branch:** `genai-city-model` (long-lived development branch; never merged to `main`).
+**Phase 0a — Data Prep Pipeline:** in progress.
+See [`docs/superpowers/STATUS.md`](docs/superpowers/STATUS.md) for the live progress tracker.
 
-The Luxembourg validation is now complete through the first roads extraction. Read [docs/LUXEMBOURG_TEST.md](./docs/LUXEMBOURG_TEST.md) for the exact commands, job IDs, outputs, failures, fixes, and conclusions.
+## Where to read
 
-The next benchmark is a full Luxembourg export across GeoJSON, GeoPackage, Parquet, and GeoJSONSeq. See [docs/LUXEMBOURG_FORMAT_BENCHMARK.md](./docs/LUXEMBOURG_FORMAT_BENCHMARK.md).
+The repository is organised so a new contributor (or new agent in a new session) can come up to speed in 30 minutes by reading:
+
+1. [`docs/superpowers/STATUS.md`](docs/superpowers/STATUS.md) — current state, last commit, next action.
+2. [`PROJECT.md`](PROJECT.md) — project context, allocation, ground-truth state.
+3. [`docs/superpowers/specs/2026-05-03-genai-city-infrastructure-design.md`](docs/superpowers/specs/2026-05-03-genai-city-infrastructure-design.md) — the design spec (architecture, data, eval, phases).
+4. [`docs/superpowers/plans/2026-05-03-phase-0a-data-prep-pipeline.md`](docs/superpowers/plans/2026-05-03-phase-0a-data-prep-pipeline.md) — current implementation plan (20 tasks, checkboxes track progress).
+5. [`docs/superpowers/brainstorm/2026-05-02-bonzai-genai-brainstorm-log.md`](docs/superpowers/brainstorm/2026-05-02-bonzai-genai-brainstorm-log.md) — full design rationale and rejected alternatives.
+
+## Repo layout
+
+```
+Bonzai-OSM/
+├── README.md                      ← this file
+├── PROJECT.md                     ← project log, allocation, Leonardo state
+├── commands.md                    ← Leonardo command reference
+├── cspell.json
+├── .gitignore
+├── docs/superpowers/              ← spec, plan, brainstorm, status
+│   ├── STATUS.md
+│   ├── specs/
+│   ├── plans/
+│   └── brainstorm/
+├── bonzai_genai/                  ← production codebase (in progress)
+│   └── …
+└── scripts/
+    └── leonardo_download_planet.sh
+```
+
+## Compute & data
+
+- **HPC allocation:** `AIFAC_P02_222` on CINECA Leonardo (EuroHPC). 40,000 core-h initial allowance; extension requested after Phase 0a de-risking shows green.
+- **Free CPU partition:** `lrd_all_serial` (4 cores / 30 GB / 4 h walltime) — used for all data prep.
+- **Billed GPU partition:** `boost_usr_prod` (4× A100, 24 h walltime) — used only for model training.
+- **Data sources:** Overture Maps `2026-04-15.0`, Foursquare OS Places `dt=2026-04-14`, OpenStreetMap planet PBF.
+
+## v1 de-risking countries
+
+Phase 0a produces tile datasets for three countries chosen for climatic and morphological contrast:
+
+| Country | Köppen | Urban form | Geofabrik size |
+|---|---|---|---|
+| Sweden | Cfb / Dfb | Northern European low-rise + sparse rural | ~700 MB |
+| Singapore | Af | Tropical ultra-dense gridded high-rise | ~30 MB |
+| Sri Lanka | Af / Aw | Tropical mixed urban + rural, dense low-rise | ~150 MB |
+
+## Pitches at three audience levels
+
+**Layperson / dinner-table:**
+
+> "We're teaching a computer what real cities look like — by showing it millions of them — so it can invent new ones. You type 'a dense European commercial district,' and it draws you a plausible map: streets in the right places, building footprints, shops, parks. Not a picture of a map, but the actual data a video game or a self-driving simulator can use."
+
+**Technical / non-ML (CTO, journalist):**
+
+> "Imagine Stable Diffusion, but for **maps** instead of images. SD generates pictures from a prompt; ours generates the underlying vector data of cities — roads, buildings, businesses — from a prompt. Self-driving companies pay around $5,000 per kilometre to map real cities and they only have a few; we generate unlimited plausible ones on demand."
+
+**ML reviewer:**
+
+> "We jointly train (i) a small multi-channel latent diffusion model on rasterised OSM/Overture tiles, and (ii) an autoregressive transformer that vectorises the diffusion's output into typed primitives (roads, buildings, POIs, land polygons) with tile-local quantised coordinates. Contribution: a tractable raster-to-vector decoding scheme for **semantically labelled** geometry at city scale."
+
+## License
+
+TBD — open weights + commercial license for the trained models; code license to be decided before paper submission.

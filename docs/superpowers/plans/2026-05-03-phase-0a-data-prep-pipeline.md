@@ -1,8 +1,8 @@
-# Phase 0a — Data Prep Pipeline & Luxembourg/Iceland Tile Dataset Implementation Plan
+# Phase 0a — Data Prep Pipeline & Sweden + Singapore + Sri Lanka Tile Dataset Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a working data prep pipeline that converts Overture / OSM / Foursquare vector data into paired (raster, vector tokens, metadata) WebDataset shards, validate it via round-trip tests, then produce the Luxembourg + Iceland tile dataset that all downstream phases depend on.
+**Goal:** Build a working data prep pipeline that converts Overture / OSM / Foursquare vector data into paired (raster, vector tokens, metadata) WebDataset shards, validate it via round-trip tests, then produce the **Sweden + Singapore + Sri Lanka** tile dataset on Leonardo that all downstream phases depend on. Three countries chosen for climatic and morphological contrast: Northern European cold-temperate sparse (Sweden), tropical ultra-dense urban (Singapore), tropical mixed dense low-rise (Sri Lanka).
 
 **Architecture:** A new Python package `bonzai_genai` with focused submodules — `vocab` (token definitions + encode/decode), `data` (tile sampling, rasterisation, vector serialisation, shard writing), `synth` (procedural city generator for smoke tests). Tile-local quantised coordinates (512 bins per axis). 9-channel rasters (3 road classes + binary roads + buildings × 2 + water + green + urban). Stratified sampling by country / climate / density. WebDataset on-disk format. Pure CPU, no GPU.
 
@@ -64,7 +64,7 @@ Bonzai-OSM/
 │   │   └── test_round_trip.py               # End-to-end vector → raster + tokens → vector
 │   ├── configs/
 │   │   ├── default.yaml                     # Tile size, channel layout, sampling params
-│   │   └── luxembourg.yaml                  # Region-specific overrides
+│   │   └── singapore.yaml                   # Region-specific overrides (example)
 │   └── scripts/
 │       ├── prepare_tiles_local.py           # Run locally on Mac
 │       └── leonardo_data_prep.sbatch        # SLURM job template
@@ -2485,28 +2485,27 @@ git commit -m "feat(cli): add prepare_tiles synthetic command"
 
 ---
 
-## Task 14: Real-data tile sampler (Overture / Geofabrik for Luxembourg)
+## Task 14: Real-data tile sampler (Overture / Geofabrik)
 
 **Files:**
 - Create: `bonzai_genai/src/bonzai_genai/data/sampling.py`
 - Create: `bonzai_genai/tests/test_sampling.py`
 
-> **Context:** Luxembourg's Geofabrik extract is already on Leonardo at
-> `/leonardo_scratch/large/userexternal/uaslam00/osm/raw/luxembourg-latest.osm.pbf`.
-> Locally, it can be downloaded from `https://download.geofabrik.de/europe/luxembourg-latest.osm.pbf`
-> (~50 MB) for development. This task uses the local copy on Mac.
+> **Context:** For local Mac development, this task uses the Singapore-area Geofabrik bundle (Malaysia + Singapore + Brunei, ~400 MB) — Singapore alone isn't a Geofabrik extract. Sweden and Sri Lanka are downloaded directly to Leonardo `$CINECA_SCRATCH` in Task 19.
 
-- [ ] **Step 1: Download Luxembourg PBF locally if not already present**
+- [ ] **Step 1: Download a small PBF locally for development (Singapore-area is smallest)**
+
+We use Singapore's Geofabrik bundle (Malaysia-Singapore-Brunei) for local Mac development since it's the smallest of the three (~400 MB combined, but we crop to Singapore). Sweden and Sri Lanka are downloaded directly to Leonardo `$CINECA_SCRATCH` in Task 19 (faster via the datamover than over residential Wi-Fi).
 
 ```bash
 mkdir -p /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai/data
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai/data
-test -f luxembourg-latest.osm.pbf || \
-    curl -L -o luxembourg-latest.osm.pbf https://download.geofabrik.de/europe/luxembourg-latest.osm.pbf
-ls -lh luxembourg-latest.osm.pbf
+test -f malaysia-singapore-brunei-latest.osm.pbf || \
+    curl -L -o malaysia-singapore-brunei-latest.osm.pbf https://download.geofabrik.de/asia/malaysia-singapore-brunei-latest.osm.pbf
+ls -lh malaysia-singapore-brunei-latest.osm.pbf
 ```
 
-Expected: ~50 MB file present.
+Expected: ~400 MB file present.
 
 - [ ] **Step 2: Add osmium-tool dependency to README**
 
@@ -2534,31 +2533,31 @@ from bonzai_genai.data.sampling import (
     iter_tile_centres,
 )
 
-LUX_PBF = Path(__file__).resolve().parents[1] / "data" / "luxembourg-latest.osm.pbf"
+SG_PBF = Path(__file__).resolve().parents[1] / "data" / "malaysia-singapore-brunei-latest.osm.pbf"
 SKIP_REAL = pytest.mark.skipif(
-    not LUX_PBF.exists(),
-    reason="Luxembourg PBF not downloaded; see Task 14 step 1",
+    not SG_PBF.exists(),
+    reason="Singapore-area PBF not downloaded; see Task 14 step 1",
 )
 
 
 def test_iter_tile_centres_returns_grid_inside_bbox():
     """Sample on a small synthetic bbox; count should match expected grid size."""
-    # bbox in deg roughly 11x11 km at 49 lat
+    # Singapore bbox roughly 31 km E-W, 27 km N-S
     centres = list(iter_tile_centres(
-        sw_lat=49.5, sw_lon=6.0, ne_lat=49.6, ne_lon=6.15,
+        sw_lat=1.20, sw_lon=103.60, ne_lat=1.48, ne_lon=104.05,
     ))
-    # ~11 km × ~11 km / 2 km per tile = ~5 × 5 grid = ~25 tiles
-    assert 16 <= len(centres) <= 36
+    # ~31 km × ~31 km / 2 km per tile ≈ 15 × 14 grid → ~150-220 tiles
+    assert 100 <= len(centres) <= 300
     for lat, lon in centres:
-        assert 49.5 <= lat <= 49.6
-        assert 6.0 <= lon <= 6.15
+        assert 1.20 <= lat <= 1.48
+        assert 103.60 <= lon <= 104.05
 
 
 @SKIP_REAL
-def test_extract_tile_geometry_from_lux_pbf_returns_some_features():
-    """One real tile from the Luxembourg PBF should have buildings + roads."""
-    # Centre of Luxembourg City is ~49.611, 6.131
-    geom = extract_tile_geometry_from_osm(LUX_PBF, sw_lat=49.605, sw_lon=6.125)
+def test_extract_tile_geometry_from_sg_pbf_returns_some_features():
+    """One real tile from central Singapore should have buildings + roads."""
+    # Marina Bay area, Singapore: ~1.28 N, 103.85 E
+    geom = extract_tile_geometry_from_osm(SG_PBF, sw_lat=1.275, sw_lon=103.845)
     assert len(geom.roads) > 0
     assert len(geom.buildings) > 0
 ```
@@ -2577,7 +2576,7 @@ Write `bonzai_genai/src/bonzai_genai/data/sampling.py`:
 
 For Phase 0a we use ``osmium`` (system tool) to extract a bounding-box
 subset to GeoJSON, then load it with Shapely. This is fine for
-Luxembourg-scale prototyping (a few seconds per tile). For Phase 2
+small-country-scale prototyping (a few seconds per tile). For Phase 2
 production we'll switch to direct Overture parquet reads in DuckDB.
 """
 from __future__ import annotations
@@ -2777,7 +2776,7 @@ git commit -m "feat(data): add OSM PBF tile sampler with osmium backend"
 
 ---
 
-## Task 15: Generate small Luxembourg tile dataset locally
+## Task 15: Generate small Singapore tile dataset locally
 
 **Files:**
 - Modify: `bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py` (add `overture-region` command)
@@ -2796,14 +2795,14 @@ def cmd_overture_region(
     ne_lat: float = typer.Option(..., help="NE corner latitude"),
     ne_lon: float = typer.Option(..., help="NE corner longitude"),
     output: Path = typer.Option(..., "-o", "--output"),
-    country: str = typer.Option("LU", "--country"),
-    koppen: str = typer.Option("Cfb", "--koppen"),
+    country: str = typer.Option("SG", "--country"),
+    koppen: str = typer.Option("Af", "--koppen"),
     shard_size: int = typer.Option(100, "--shard-size"),
     max_tiles: int = typer.Option(1000, "--max-tiles"),
 ) -> None:
     """Generate tile bundles for every tile in (sw, ne) bbox from an OSM PBF.
 
-    Used for Phase 0a Luxembourg/Iceland validation runs.
+    Used for Phase 0a Sweden + Singapore + Sri Lanka validation runs.
     """
     from bonzai_genai.data.sampling import extract_tile_geometry_from_osm, iter_tile_centres
 
@@ -2853,20 +2852,20 @@ def cmd_overture_region(
     console.print(f"[bold green]Kept {n_kept} tiles, skipped {n_skipped}")
 ```
 
-- [ ] **Step 2: Run on the central Luxembourg City area**
+- [ ] **Step 2: Run on Singapore (full island fits in ~150 tiles)**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
 .venv/bin/python scripts/prepare_tiles_local.py overture-region \
-    --pbf data/luxembourg-latest.osm.pbf \
-    --sw-lat 49.55 --sw-lon 6.00 \
-    --ne-lat 49.70 --ne-lon 6.20 \
-    -o /tmp/bonzai-lux \
-    --country LU --koppen Cfb \
-    --shard-size 50 --max-tiles 100
+    --pbf data/malaysia-singapore-brunei-latest.osm.pbf \
+    --sw-lat 1.20 --sw-lon 103.60 \
+    --ne-lat 1.48 --ne-lon 104.05 \
+    -o /tmp/bonzai-sg \
+    --country SG --koppen Af \
+    --shard-size 50 --max-tiles 200
 ```
 
-Expected: progress bar shows ~50–100 tiles processed, shards written to `/tmp/bonzai-lux/`.
+Expected: progress bar shows ~100–200 tiles processed, shards written to `/tmp/bonzai-sg/`.
 
 - [ ] **Step 3: Verify shards are readable and contain real geometry**
 
@@ -2874,8 +2873,8 @@ Expected: progress bar shows ~50–100 tiles processed, shards written to `/tmp/
 .venv/bin/python -c "
 from pathlib import Path
 from bonzai_genai.data.shard_writer import read_shard_bundles
-bundles = list(read_shard_bundles(Path('/tmp/bonzai-lux')))
-print(f'Read back {len(bundles)} Luxembourg bundles')
+bundles = list(read_shard_bundles(Path('/tmp/bonzai-sg')))
+print(f'Read back {len(bundles)} Singapore bundles')
 for b in bundles[:3]:
     print(f'  {b.metadata.tile_id}: tokens={len(b.tokens)}, raster_sum={b.raster.sum():.0f}')
 "
@@ -2892,18 +2891,18 @@ from pathlib import Path
 from PIL import Image
 from bonzai_genai.data.shard_writer import read_shard_bundles
 from bonzai_genai.config import CHANNEL_NAMES
-bundles = list(read_shard_bundles(Path('/tmp/bonzai-lux')))
-out = Path('/tmp/bonzai-lux-viz'); out.mkdir(exist_ok=True)
+bundles = list(read_shard_bundles(Path('/tmp/bonzai-sg')))
+out = Path('/tmp/bonzai-sg-viz'); out.mkdir(exist_ok=True)
 for b in bundles[:3]:
     for c, name in enumerate(CHANNEL_NAMES):
         Image.fromarray((b.raster[c] * 255).astype(np.uint8)).save(out / f'{b.metadata.tile_id}-{c}-{name}.png')
 print(f'Saved channel images to {out}')
 "
-ls /tmp/bonzai-lux-viz/ | head
-open /tmp/bonzai-lux-viz/  # macOS Finder
+ls /tmp/bonzai-sg-viz/ | head
+open /tmp/bonzai-sg-viz/  # macOS Finder
 ```
 
-Expected: per-channel PNGs visualising the Luxembourg City raster. Roads should look like roads; building channel should look like building footprints.
+Expected: per-channel PNGs visualising central Singapore. Roads should look like roads; building channel should look like building footprints.
 
 - [ ] **Step 5: Commit**
 
@@ -2997,27 +2996,46 @@ Examples:
 # 100 synthetic tiles
 .venv/bin/python scripts/prepare_tiles_local.py synthetic -o /tmp/bonzai-syn -n 100
 
-# Luxembourg City area (~100 real tiles)
+# Singapore (~150 real tiles, full island)
 .venv/bin/python scripts/prepare_tiles_local.py overture-region \
-    --pbf data/luxembourg-latest.osm.pbf \
-    --sw-lat 49.55 --sw-lon 6.00 \
-    --ne-lat 49.70 --ne-lon 6.20 \
-    -o /tmp/bonzai-lux \
-    --country LU --koppen Cfb
+    --pbf data/malaysia-singapore-brunei-latest.osm.pbf \
+    --sw-lat 1.20 --sw-lon 103.60 \
+    --ne-lat 1.48 --ne-lon 104.05 \
+    -o /tmp/bonzai-sg \
+    --country SG --koppen Af
 ```
 
 ## `leonardo_data_prep.sbatch`
 
 SLURM job template for the free `lrd_all_serial` partition. Set env-vars
-before submission:
+before submission. Examples for the three Phase 0a countries:
 
 ```bash
-export BONZAI_PBF=$CINECA_SCRATCH/osm/raw/luxembourg-latest.osm.pbf
-export BONZAI_SW_LAT=49.4 BONZAI_SW_LON=5.7
-export BONZAI_NE_LAT=50.2 BONZAI_NE_LON=6.6
-export BONZAI_COUNTRY=LU BONZAI_KOPPEN=Cfb
-export BONZAI_OUT=$WORK/bonzai-tiles/luxembourg
+# Singapore (smallest, fastest)
+export BONZAI_PBF=$CINECA_SCRATCH/osm/raw/malaysia-singapore-brunei-latest.osm.pbf
+export BONZAI_SW_LAT=1.20 BONZAI_SW_LON=103.60
+export BONZAI_NE_LAT=1.48 BONZAI_NE_LON=104.05
+export BONZAI_COUNTRY=SG BONZAI_KOPPEN=Af
+export BONZAI_OUT=$WORK/bonzai-tiles/singapore
+export BONZAI_MAX_TILES=300
+sbatch scripts/leonardo_data_prep.sbatch
+
+# Sri Lanka
+export BONZAI_PBF=$CINECA_SCRATCH/osm/raw/sri-lanka-latest.osm.pbf
+export BONZAI_SW_LAT=5.85 BONZAI_SW_LON=79.55
+export BONZAI_NE_LAT=9.90 BONZAI_NE_LON=81.95
+export BONZAI_COUNTRY=LK BONZAI_KOPPEN=Aw
+export BONZAI_OUT=$WORK/bonzai-tiles/sri_lanka
 export BONZAI_MAX_TILES=2000
+sbatch scripts/leonardo_data_prep.sbatch
+
+# Sweden
+export BONZAI_PBF=$CINECA_SCRATCH/osm/raw/sweden-latest.osm.pbf
+export BONZAI_SW_LAT=55.0 BONZAI_SW_LON=10.5
+export BONZAI_NE_LAT=69.5 BONZAI_NE_LON=24.5
+export BONZAI_COUNTRY=SE BONZAI_KOPPEN=Cfb
+export BONZAI_OUT=$WORK/bonzai-tiles/sweden
+export BONZAI_MAX_TILES=5000
 sbatch scripts/leonardo_data_prep.sbatch
 ```
 ```
@@ -3098,7 +3116,7 @@ See `scripts/README.md`.
 
 ## Phase 0a deliverable
 
-Working data-prep pipeline + a Luxembourg + Iceland tile dataset on
+Working data-prep pipeline + a Sweden + Singapore + Sri Lanka tile dataset on
 Leonardo `$WORK`, validated by round-trip tests.
 ```
 
@@ -3152,12 +3170,12 @@ git commit -m "style(bonzai_genai): apply ruff and black formatting"
 
 ---
 
-## Task 19: Deploy to Leonardo and run real Luxembourg job
+## Task 19: Deploy to Leonardo and run all three country jobs
 
 **Files:**
 - No code changes. Deployment + validation.
 
-> This task assumes you have an active Leonardo SSH cert (`step ssh login`) and that the Luxembourg PBF is already at `$CINECA_SCRATCH/osm/raw/luxembourg-latest.osm.pbf` (it is — see PROJECT.md).
+> This task assumes you have an active Leonardo SSH cert (`step ssh login`) and downloads the three country PBFs to `$CINECA_SCRATCH` via the datamover.
 
 - [ ] **Step 1: Sync the package to Leonardo**
 
@@ -3187,93 +3205,122 @@ exit
 
 If `osmium` isn't available as a module on Leonardo, fall back to using GDAL's OSM driver (this is a Plan 1.5 task — record as a follow-up if encountered).
 
-- [ ] **Step 3: Submit the Luxembourg data prep job**
+- [ ] **Step 3: Download the three PBFs via the Leonardo datamover**
 
 ```bash
 ssh uaslam00@login.leonardo.cineca.it
+mkdir -p "$CINECA_SCRATCH/osm/raw"
+
+# Singapore (Geofabrik bundles it with Malaysia + Brunei)
+test -f "$CINECA_SCRATCH/osm/raw/malaysia-singapore-brunei-latest.osm.pbf" || \
+    ssh -xt $USER@data.leonardo.cineca.it \
+    wget -O "$CINECA_SCRATCH/osm/raw/malaysia-singapore-brunei-latest.osm.pbf" \
+    https://download.geofabrik.de/asia/malaysia-singapore-brunei-latest.osm.pbf
+
+# Sri Lanka
+test -f "$CINECA_SCRATCH/osm/raw/sri-lanka-latest.osm.pbf" || \
+    ssh -xt $USER@data.leonardo.cineca.it \
+    wget -O "$CINECA_SCRATCH/osm/raw/sri-lanka-latest.osm.pbf" \
+    https://download.geofabrik.de/asia/sri-lanka-latest.osm.pbf
+
+# Sweden
+test -f "$CINECA_SCRATCH/osm/raw/sweden-latest.osm.pbf" || \
+    ssh -xt $USER@data.leonardo.cineca.it \
+    wget -O "$CINECA_SCRATCH/osm/raw/sweden-latest.osm.pbf" \
+    https://download.geofabrik.de/europe/sweden-latest.osm.pbf
+
+ls -lh "$CINECA_SCRATCH/osm/raw/"*.osm.pbf
+```
+
+Expected: three PBFs present (Singapore-bundle ~400 MB, Sri Lanka ~150 MB, Sweden ~700 MB).
+
+- [ ] **Step 4: Submit Singapore data prep (smallest job, run first)**
+
+```bash
 cd "$WORK/bonzai_genai"
 mkdir -p logs
-export BONZAI_PBF=/leonardo_scratch/large/userexternal/uaslam00/osm/raw/luxembourg-latest.osm.pbf
-export BONZAI_SW_LAT=49.4 BONZAI_SW_LON=5.7
-export BONZAI_NE_LAT=50.2 BONZAI_NE_LON=6.6
-export BONZAI_COUNTRY=LU BONZAI_KOPPEN=Cfb
-export BONZAI_OUT="$WORK/bonzai-tiles/luxembourg"
-export BONZAI_MAX_TILES=2000
+export BONZAI_PBF=/leonardo_scratch/large/userexternal/uaslam00/osm/raw/malaysia-singapore-brunei-latest.osm.pbf
+export BONZAI_SW_LAT=1.20 BONZAI_SW_LON=103.60
+export BONZAI_NE_LAT=1.48 BONZAI_NE_LON=104.05
+export BONZAI_COUNTRY=SG BONZAI_KOPPEN=Af
+export BONZAI_OUT="$WORK/bonzai-tiles/singapore"
+export BONZAI_MAX_TILES=300
 sbatch scripts/leonardo_data_prep.sbatch
 squeue -u $USER
 ```
 
-Expected: job submitted; check `squeue` for status.
-
-- [ ] **Step 4: Monitor and verify outputs**
-
-After job completes (4 h max walltime; should be much faster):
+Wait for completion (should be < 30 min on `lrd_all_serial`). Verify:
 
 ```bash
-cat "$WORK/bonzai-tiles/luxembourg/manifest.json"
-ls "$WORK/bonzai-tiles/luxembourg/" | head -20
+cat "$WORK/bonzai-tiles/singapore/manifest.json"
 ```
 
-Expected: manifest shows hundreds-to-thousands of tiles; multiple shard files present.
+Expected: ~100–200 tiles, multiple shards.
 
-- [ ] **Step 5: Spot-check on Leonardo**
+- [ ] **Step 5: Submit Sri Lanka and Sweden in parallel**
 
 ```bash
-.venv/bin/python -c "
+# Sri Lanka
+export BONZAI_PBF=/leonardo_scratch/large/userexternal/uaslam00/osm/raw/sri-lanka-latest.osm.pbf
+export BONZAI_SW_LAT=5.85 BONZAI_SW_LON=79.55
+export BONZAI_NE_LAT=9.90 BONZAI_NE_LON=81.95
+export BONZAI_COUNTRY=LK BONZAI_KOPPEN=Aw
+export BONZAI_OUT="$WORK/bonzai-tiles/sri_lanka"
+export BONZAI_MAX_TILES=2000
+sbatch scripts/leonardo_data_prep.sbatch
+
+# Sweden
+export BONZAI_PBF=/leonardo_scratch/large/userexternal/uaslam00/osm/raw/sweden-latest.osm.pbf
+export BONZAI_SW_LAT=55.0 BONZAI_SW_LON=10.5
+export BONZAI_NE_LAT=69.5 BONZAI_NE_LON=24.5
+export BONZAI_COUNTRY=SE BONZAI_KOPPEN=Cfb
+export BONZAI_OUT="$WORK/bonzai-tiles/sweden"
+export BONZAI_MAX_TILES=5000
+sbatch scripts/leonardo_data_prep.sbatch
+
+squeue -u $USER
+```
+
+Expected: both jobs queued. Sri Lanka ~1–2 h; Sweden may approach 4 h walltime cap — if it hits, chain a second job from the last completed tile (note as a follow-up).
+
+- [ ] **Step 6: Spot-check each output on Leonardo**
+
+```bash
+for c in singapore sri_lanka sweden; do
+    echo "=== $c ==="
+    cat "$WORK/bonzai-tiles/$c/manifest.json"
+    .venv/bin/python -c "
 from pathlib import Path
 from bonzai_genai.data.shard_writer import read_shard_bundles
 import itertools
-bundles = list(itertools.islice(read_shard_bundles(Path('$WORK/bonzai-tiles/luxembourg')), 5))
+bundles = list(itertools.islice(read_shard_bundles(Path('$WORK/bonzai-tiles/$c')), 3))
 for b in bundles:
-    print(f'{b.metadata.tile_id}: tokens={len(b.tokens)}, raster_sum={b.raster.sum():.0f}')
+    print(f'  {b.metadata.tile_id}: tokens={len(b.tokens)}, raster_sum={b.raster.sum():.0f}')
 "
+done
 ```
 
-Expected: 5 tile metadata lines with sensible token counts and raster sums.
-
-- [ ] **Step 6: Submit the Iceland data prep job (parallel)**
-
-First download the Iceland PBF if not present:
-
-```bash
-mkdir -p "$CINECA_SCRATCH/osm/raw"
-test -f "$CINECA_SCRATCH/osm/raw/iceland-latest.osm.pbf" || \
-    ssh -xt $USER@data.leonardo.cineca.it \
-    wget -O "$CINECA_SCRATCH/osm/raw/iceland-latest.osm.pbf" \
-    https://download.geofabrik.de/europe/iceland-latest.osm.pbf
-```
-
-Then submit the Iceland tile job:
-
-```bash
-export BONZAI_PBF=/leonardo_scratch/large/userexternal/uaslam00/osm/raw/iceland-latest.osm.pbf
-export BONZAI_SW_LAT=63.3 BONZAI_SW_LON=-24.6
-export BONZAI_NE_LAT=66.6 BONZAI_NE_LON=-13.4
-export BONZAI_COUNTRY=IS BONZAI_KOPPEN=ET
-export BONZAI_OUT="$WORK/bonzai-tiles/iceland"
-export BONZAI_MAX_TILES=1000
-sbatch scripts/leonardo_data_prep.sbatch
-```
+Expected: three subdirectories (`singapore/`, `sri_lanka/`, `sweden/`), each with non-zero raster sums.
 
 - [ ] **Step 7: Final inventory**
 
 ```bash
+du -sh "$WORK/bonzai-tiles/"*
 ls "$WORK/bonzai-tiles/"
-cat "$WORK/bonzai-tiles/luxembourg/manifest.json"
-cat "$WORK/bonzai-tiles/iceland/manifest.json"
 ```
 
-Expected: two subdirectories (`luxembourg/`, `iceland/`), each with hundreds to thousands of tiles. **This is the Phase 0a deliverable.**
+Expected: three subdirectories. **This is the Phase 0a deliverable.**
 
 - [ ] **Step 8: Pull manifests back to local repo for record**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM
 mkdir -p bonzai_genai/results
-rsync -az uaslam00@login.leonardo.cineca.it:/leonardo_work/AIFAC_P02_222/bonzai-tiles/luxembourg/manifest.json bonzai_genai/results/luxembourg-manifest.json
-rsync -az uaslam00@login.leonardo.cineca.it:/leonardo_work/AIFAC_P02_222/bonzai-tiles/iceland/manifest.json bonzai_genai/results/iceland-manifest.json
+for c in singapore sri_lanka sweden; do
+    rsync -az "uaslam00@login.leonardo.cineca.it:/leonardo_work/AIFAC_P02_222/bonzai-tiles/$c/manifest.json" "bonzai_genai/results/$c-manifest.json"
+done
 git add bonzai_genai/results/
-git commit -m "feat(data): record Luxembourg + Iceland tile manifests on Leonardo"
+git commit -m "feat(data): record Sweden + Singapore + Sri Lanka tile manifests on Leonardo"
 ```
 
 ---
@@ -3288,10 +3335,10 @@ git commit -m "feat(data): record Luxembourg + Iceland tile manifests on Leonard
 Write `bonzai_genai/results/PHASE_0A_COMPLETE.md`:
 
 ```markdown
-# Phase 0a Completion — Data Prep Pipeline + Luxembourg/Iceland Tiles
+# Phase 0a Completion — Data Prep Pipeline + Sweden + Singapore + Sri Lanka Tiles
 
 **Completed:** YYYY-MM-DD (fill in)
-**Branch:** `overture-map`
+**Branch:** `genai-city-model`
 
 ## Deliverables shipped
 
@@ -3303,13 +3350,15 @@ Write `bonzai_genai/results/PHASE_0A_COMPLETE.md`:
 - ✅ End-to-end synthetic round-trip test
 - ✅ Real-data tile sampler (osmium-backed)
 - ✅ Slurm job template for Leonardo data prep
-- ✅ Luxembourg tile dataset on Leonardo `$WORK/bonzai-tiles/luxembourg/`
-- ✅ Iceland tile dataset on Leonardo `$WORK/bonzai-tiles/iceland/`
+- ✅ Sweden tile dataset on Leonardo `$WORK/bonzai-tiles/sweden/`
+- ✅ Singapore tile dataset on Leonardo `$WORK/bonzai-tiles/singapore/`
+- ✅ Sri Lanka tile dataset on Leonardo `$WORK/bonzai-tiles/sri_lanka/`
 
 ## Counts (fill in from manifests)
 
-- Luxembourg tiles: NNN
-- Iceland tiles: NNN
+- Sweden tiles: NNN
+- Singapore tiles: NNN
+- Sri Lanka tiles: NNN
 - Total disk: NN MB
 
 ## Open follow-ups for Plan 2+
