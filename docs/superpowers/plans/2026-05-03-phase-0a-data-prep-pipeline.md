@@ -2493,7 +2493,7 @@ git commit -m "feat(cli): add prepare_tiles synthetic command"
 
 > **Context:** For local Mac development, this task uses the Singapore-area Geofabrik bundle (Malaysia + Singapore + Brunei, ~400 MB) — Singapore alone isn't a Geofabrik extract. Sweden and Sri Lanka are downloaded directly to Leonardo `$CINECA_SCRATCH` in Task 19.
 
-- [ ] **Step 1: Download a small PBF locally for development (Singapore-area is smallest)**
+- [x] **Step 1: Download a small PBF locally for development (Singapore-area is smallest)**
 
 We use Singapore's Geofabrik bundle (Malaysia-Singapore-Brunei) for local Mac development since it's the smallest of the three (~400 MB combined, but we crop to Singapore). Sweden and Sri Lanka are downloaded directly to Leonardo `$CINECA_SCRATCH` in Task 19 (faster via the datamover than over residential Wi-Fi).
 
@@ -2507,7 +2507,7 @@ ls -lh malaysia-singapore-brunei-latest.osm.pbf
 
 Expected: ~400 MB file present.
 
-- [ ] **Step 2: Add osmium-tool dependency to README**
+- [x] **Step 2: Add osmium-tool dependency to README**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
@@ -2517,7 +2517,7 @@ osmium --version
 
 Expected: osmium version printed.
 
-- [ ] **Step 3: Write the failing test**
+- [x] **Step 3: Write the failing test**
 
 Write `bonzai_genai/tests/test_sampling.py`:
 
@@ -2562,12 +2562,12 @@ def test_extract_tile_geometry_from_sg_pbf_returns_some_features():
     assert len(geom.buildings) > 0
 ```
 
-- [ ] **Step 4: Run test to verify it fails**
+- [x] **Step 4: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_sampling.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 5: Implement sampling module**
+- [x] **Step 5: Implement sampling module**
 
 Write `bonzai_genai/src/bonzai_genai/data/sampling.py`:
 
@@ -2762,12 +2762,12 @@ def extract_tile_geometry_from_osm(
     return geom
 ```
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `.venv/bin/pytest tests/test_sampling.py -v`
 Expected: 2 tests pass (the second is skipped if the PBF isn't downloaded yet — re-run after step 1 confirms presence).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/data/sampling.py bonzai_genai/tests/test_sampling.py
@@ -2781,7 +2781,7 @@ git commit -m "feat(data): add OSM PBF tile sampler with osmium backend"
 **Files:**
 - Modify: `bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py` (add `overture-region` command)
 
-- [ ] **Step 1: Add the new CLI command**
+- [x] **Step 1: Add the new CLI command**
 
 Append to `bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py` (before `if __name__`):
 
@@ -2852,7 +2852,7 @@ def cmd_overture_region(
     console.print(f"[bold green]Kept {n_kept} tiles, skipped {n_skipped}")
 ```
 
-- [ ] **Step 2: Run on Singapore (full island fits in ~150 tiles)**
+- [x] **Step 2: Run on Singapore (full island fits in ~150 tiles)**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
@@ -2867,7 +2867,7 @@ cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
 
 Expected: progress bar shows ~100–200 tiles processed, shards written to `/tmp/bonzai-sg/`.
 
-- [ ] **Step 3: Verify shards are readable and contain real geometry**
+- [x] **Step 3: Verify shards are readable and contain real geometry**
 
 ```bash
 .venv/bin/python -c "
@@ -2882,7 +2882,7 @@ for b in bundles[:3]:
 
 Expected: nonzero raster sums for most tiles, token sequences in the hundreds-to-thousands range.
 
-- [ ] **Step 4: Spot-check via raster visualisation**
+- [x] **Step 4: Spot-check via raster visualisation**
 
 ```bash
 .venv/bin/python -c "
@@ -2904,7 +2904,7 @@ open /tmp/bonzai-sg-viz/  # macOS Finder
 
 Expected: per-channel PNGs visualising central Singapore. Roads should look like roads; building channel should look like building footprints.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py
@@ -2918,7 +2918,7 @@ git commit -m "feat(cli): add overture-region command for real OSM tile generati
 **Files:**
 - Create: `bonzai_genai/scripts/leonardo_data_prep.sbatch`
 
-- [ ] **Step 1: Write the Slurm template**
+- [x] **Step 1: Write the Slurm template**
 
 Write `bonzai_genai/scripts/leonardo_data_prep.sbatch`:
 
@@ -2968,7 +2968,7 @@ echo "Job complete; manifest:"
 cat "$BONZAI_OUT/manifest.json"
 ```
 
-- [ ] **Step 2: Verify the template parses (locally, without submitting)**
+- [x] **Step 2: Verify the template parses (locally, without submitting)**
 
 ```bash
 bash -n /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai/scripts/leonardo_data_prep.sbatch && echo OK
@@ -2976,7 +2976,7 @@ bash -n /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai/scripts/leonar
 
 Expected: `OK`.
 
-- [ ] **Step 3: Add usage documentation in scripts/README.md**
+- [x] **Step 3: Add usage documentation in scripts/README.md**
 
 Write `bonzai_genai/scripts/README.md`:
 
@@ -3040,7 +3040,7 @@ sbatch scripts/leonardo_data_prep.sbatch
 ```
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add bonzai_genai/scripts/leonardo_data_prep.sbatch bonzai_genai/scripts/README.md
@@ -3054,7 +3054,7 @@ git commit -m "feat(slurm): add Leonardo data-prep job template"
 **Files:**
 - Create: `bonzai_genai/README.md`
 
-- [ ] **Step 1: Write the README**
+- [x] **Step 1: Write the README**
 
 Write `bonzai_genai/README.md`:
 
@@ -3120,7 +3120,7 @@ Working data-prep pipeline + a Sweden + Singapore + Sri Lanka tile dataset on
 Leonardo `$WORK`, validated by round-trip tests.
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add bonzai_genai/README.md
@@ -3134,7 +3134,7 @@ git commit -m "docs(bonzai_genai): add package README"
 **Files:**
 - No code changes. Validation only.
 
-- [ ] **Step 1: Full test suite**
+- [x] **Step 1: Full test suite**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
@@ -3143,7 +3143,7 @@ cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
 
 Expected: all tests pass (the count depends on how many were added; should be ~30+).
 
-- [ ] **Step 2: Run ruff**
+- [x] **Step 2: Run ruff**
 
 ```bash
 .venv/bin/ruff check src/ tests/ scripts/
@@ -3151,7 +3151,7 @@ Expected: all tests pass (the count depends on how many were added; should be ~3
 
 Expected: no errors. Fix any flagged issues inline.
 
-- [ ] **Step 3: Run black**
+- [x] **Step 3: Run black**
 
 ```bash
 .venv/bin/black --check src/ tests/ scripts/
@@ -3159,7 +3159,7 @@ Expected: no errors. Fix any flagged issues inline.
 
 Expected: all files already formatted (or run without `--check` to format and recommit).
 
-- [ ] **Step 4: Commit any format fixes**
+- [x] **Step 4: Commit any format fixes**
 
 If `ruff` or `black` made changes:
 

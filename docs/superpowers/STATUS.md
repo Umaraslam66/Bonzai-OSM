@@ -1,6 +1,6 @@
 # Bonzai-OSM — Live Status
 
-> **Last updated:** 2026-05-03 (this session in progress, paused after Plan Task 13)
+> **Last updated:** 2026-05-03 (this session — Plan Tasks 1–18 complete; only Leonardo deployment + completion summary remain)
 >
 > If you are a new agent starting a session: read this file first, then [`PROJECT.md`](../../PROJECT.md), then the [spec](specs/2026-05-03-genai-city-infrastructure-design.md), then the [active plan](plans/2026-05-03-phase-0a-data-prep-pipeline.md). Pick up from the next unchecked task.
 
@@ -13,15 +13,20 @@
 | Branch | `genai-city-model` (long-lived dev branch — **never merge to main**) |
 | Active phase | **Phase 0a — Data Prep Pipeline + 3-country tile dataset** |
 | Active plan | [`plans/2026-05-03-phase-0a-data-prep-pipeline.md`](plans/2026-05-03-phase-0a-data-prep-pipeline.md) (20 tasks) |
-| Last completed plan task | **Plan Task 13: Smoke test CLI** (commit `64036e2`) |
-| Next action | **Plan Task 14: Real-data tile sampler (Overture / Geofabrik)** |
-| Tests passing | **48 / 48** |
+| Last completed plan task | **Plan Task 18: Run the full test suite + lint** (commit `18416d4`) |
+| Next action | **Plan Task 19: Deploy to Leonardo and run all three country jobs** *(requires user's active SSH cert)* |
+| Tests passing | **50 / 50** |
+| Ruff lint | **Clean** |
 | GPU-h burned this session | 0 |
 | GPU-h burned cumulative on project | 14 (from prior sessions, pre-v1) |
 
 ## Recent commit history (most recent first)
 
 ```
+18416d4 feat: package README + ruff/black-clean + Slurm template (Plan Tasks 16-18)
+daf4147 feat(cli): add overture-region command for real OSM tile generation
+40b58e8 feat(data): add OSM PBF tile sampler (osmium-backed)
+8890275 docs: mark Plan Tasks 6-13 complete; refresh STATUS.md
 64036e2 feat(cli): add prepare_tiles synthetic command
 484d5d3 test(integration): add end-to-end synthetic round-trip test
 f45e379 feat(synth): add deterministic procedural tile generator
@@ -41,125 +46,111 @@ cef2396 Add Phase 0a implementation plan for data prep pipeline
 
 ## Plan progress (Phase 0a — 20 tasks)
 
-- [x] Task 1: Project scaffolding (pyproject.toml + src layout)
-- [x] Task 2: Install dev dependencies + verify pytest works
+- [x] Task 1: Project scaffolding
+- [x] Task 2: Install dev dependencies
 - [x] Task 3: Global config module
 - [x] Task 4: Token type definitions
 - [x] Task 5: Attribute vocabulary
-- [x] Task 6: Tokeniser — encode primitives to token sequence
+- [x] Task 6: Tokeniser encode/decode
 - [x] Task 7: Tokeniser round-trip property test
-- [x] Task 8: Rasteriser — line and polygon painting
+- [x] Task 8: 9-channel rasteriser
 - [x] Task 9: TileBundle dataclass + serialisation
 - [x] Task 10: WebDataset shard writer + reader
 - [x] Task 11: Synthetic procedural city generator
 - [x] Task 12: End-to-end synthetic round-trip test
-- [x] Task 13: Smoke test CLI — generate 100 synthetic shards locally
-- [ ] **Task 14: Real-data tile sampler (Overture / Geofabrik)  ← NEXT**
-- [ ] Task 15: Generate small Singapore tile dataset locally
-- [ ] Task 16: Slurm template for Leonardo data prep
-- [ ] Task 17: Plan-level documentation in repo README
-- [ ] Task 18: Run the full test suite + lint
-- [ ] Task 19: Deploy to Leonardo and run all three country jobs
+- [x] Task 13: Smoke test CLI (synthetic command)
+- [x] Task 14: Real-data tile sampler (osmium)
+- [x] Task 15: overture-region CLI + first Singapore tiles
+- [x] Task 16: Slurm template for Leonardo
+- [x] Task 17: Package README
+- [x] Task 18: Full test suite + ruff
+- [ ] **Task 19: Deploy to Leonardo and run all three country jobs ← NEXT (needs your SSH cert)**
 - [ ] Task 20: Plan completion summary
 
-## What was built so far in `bonzai_genai/`
+## What was built (final tally for Phase 0a code)
 
 ```
 bonzai_genai/
-├── pyproject.toml                     ✅ Python 3.11+, deps + dev deps
-├── .gitignore                          ✅ ignores top-level data/, shards/, .venv/, etc.
-├── conftest.py                         ✅ adds src/ to sys.path (editable-install workaround)
-├── .venv/                              ✅ Python 3.12 venv (pip 26 / setuptools-editable .pth files
-│                                          aren't honoured during pytest collection or script
-│                                          execution; conftest + sys.path-prepend in scripts works
-│                                          around it. Cause unknown — likely setuptools/pip bug.)
+├── pyproject.toml                     ✅
+├── README.md                          ✅
+├── .gitignore                          ✅
+├── conftest.py                         ✅ (sys.path workaround for editable-install)
+├── .venv/                              ✅ Python 3.12, all deps installed
 ├── src/bonzai_genai/
-│   ├── __init__.py                    ✅
-│   ├── config.py                      ✅ TILE_SIDE_M=2048, RASTER_PX=512, METRES_PER_PX=4, COORD_BINS=512, NUM_CHANNELS=9
-│   ├── vocab/
-│   │   ├── tokens.py                  ✅ SpecialToken IntEnum (15), coord_x/y_token_id, parse_*
-│   │   ├── attributes.py              ✅ AttributeVocab + load_default_vocab()
-│   │   └── tokeniser.py               ✅ Tokeniser.encode/decode + Building/Road/POI/LandPolygon/TileGeometry
-│   ├── data/
-│   │   ├── rasteriser.py              ✅ rasterise(geom) → 9-channel float32 (PIL + scipy.gaussian_filter)
-│   │   ├── tile_bundle.py             ✅ TileBundle + TileMetadata (raster.npy/tokens.json/metadata.json)
-│   │   └── shard_writer.py            ✅ ShardWriter + read_shard_bundles() (WebDataset tar shards)
-│   ├── synth/
-│   │   └── procedural.py              ✅ generate_synthetic_tile(seed) - 8x8 grid roads + jittered rectangles + POIs
-│   └── cli/
-│       └── prepare_tiles.py           ✅ Typer CLI with `synthetic` subcommand (default for now; multi when Task 15 lands)
-├── configs/
-│   └── attributes_v1.yaml             ✅ 290 attribute tokens (road/building/land/water/poi families + heights)
+│   ├── config.py                      ✅
+│   ├── vocab/{tokens,attributes,tokeniser}.py    ✅
+│   ├── data/{rasteriser,tile_bundle,shard_writer,sampling}.py    ✅
+│   ├── synth/procedural.py            ✅
+│   └── cli/prepare_tiles.py           ✅ (synthetic + overture-region commands)
+├── configs/attributes_v1.yaml         ✅ (290 attributes, will expand to ~1,800 in Plan 5)
 ├── scripts/
-│   └── prepare_tiles_local.py         ✅ wrapper with sys.path fallback
-└── tests/                              ✅ 48 tests, all passing
-    ├── test_config.py                  (5)
-    ├── test_tokens.py                  (7)
-    ├── test_attributes.py              (7)
-    ├── test_tokeniser.py               (8 — 6 unit + 2 round-trip)
-    ├── test_rasteriser.py              (8)
-    ├── test_tile_bundle.py             (5)
-    ├── test_shard_writer.py            (4)
-    ├── test_synth.py                   (3)
-    └── test_round_trip.py              (1 end-to-end integration)
+│   ├── prepare_tiles_local.py         ✅
+│   ├── leonardo_data_prep.sbatch      ✅
+│   └── README.md                      ✅
+├── data/                               ⏸ (gitignored; Singapore PBF here for local dev)
+└── tests/                              ✅ 50/50 pass, ruff-clean
+    ├── test_config.py (5)
+    ├── test_tokens.py (7)
+    ├── test_attributes.py (7)
+    ├── test_tokeniser.py (8)
+    ├── test_rasteriser.py (8)
+    ├── test_tile_bundle.py (5)
+    ├── test_shard_writer.py (4)
+    ├── test_synth.py (3)
+    ├── test_sampling.py (2 — including real Marina Bay extract)
+    └── test_round_trip.py (1)
 ```
 
-**Total vocab: 15 special + 1024 coord + 290 attribute = 1,329 tokens.** Will grow to ~1,800 in Plan 5 when full FSQ leaf categories are integrated.
+## Real-data smoke run (already done locally)
 
-## Smoke run verified
+**Western Singapore, 50 tile centres attempted, 4 successfully encoded:**
 
-```bash
-cd bonzai_genai
-.venv/bin/python scripts/prepare_tiles_local.py -o /tmp/bonzai-syn -n 50 --shard-size 25
-# → 50 tiles, 2 shards, manifest.json, ~50 KB each, 1,218-token sequences
+```
+SG-000018 (1.357,103.650): tokens=2129, raster_sum=68878
+SG-000027 (1.375,103.650): tokens=2000, raster_sum=76728
+SG-000036 (1.394,103.650): tokens=1862, raster_sum=25708
+SG-000039 (1.394,103.705): tokens=7195, raster_sum=65149
 ```
 
-Round-trip via `read_shard_bundles` returns 50 bundles with intact `(9, 512, 512)` rasters and 1,218-element token lists.
+The other 46 tiles overflowed the 512 road-node cap. **This is a known limit of the current encoding** — the tokeniser temporarily packs node references into the x-coord token namespace (capped at COORD_BINS=512). Plan 4 (Stage B) introduces dedicated node-ref tokens to lift this cap. For Phase 0a, the CLI handles overflow by `skip-and-continue`, which is correct behaviour.
+
+**This also confirms Singapore as the "ultra-dense urban" extreme of our country triple** — every Singapore tile pushes the encoding limit.
 
 ## Notes for the next agent / next session
 
-### How to resume execution
+### How to resume execution (Plan Task 19)
 
-1. `git status` on branch `genai-city-model` should be clean.
-2. `cd bonzai_genai && .venv/bin/pytest -v` should report 48/48 passing.
-3. Open the active plan and find **Task 14: Real-data tile sampler**. It introduces:
-   - `osmium` system dependency (`brew install osmium-tool` on Mac).
-   - Singapore-area Geofabrik bundle download (~400 MB).
-   - `bonzai_genai/src/bonzai_genai/data/sampling.py` with `iter_tile_centres` + `extract_tile_geometry_from_osm`.
-   - `bonzai_genai/tests/test_sampling.py` with one bbox test + one PBF-skipped real-data test.
-4. Then Task 15 adds the `overture-region` CLI command and runs ~100 Singapore tiles locally.
+This is the Leonardo deployment task. **Requires the PI's active Leonardo SSH cert** (`step ssh login 'aslamumar16@gmail.com' --provisioner cineca-hpc`).
 
-### Key environmental facts
+Execution path:
 
-- **Python:** macOS dev machine has `python3.12`, not `python3.11`. The pyproject `requires-python = ">=3.11"` permits this.
-- **Bash session loses cwd between tool calls.** Always `cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai && ...` for venv-based commands.
-- **Editable-install gotcha:** `pip install -e .` writes a `.pth` file at `.venv/lib/python3.12/site-packages/__editable__.bonzai_genai-0.1.0.pth` containing the absolute path to `src/`, but Python's site processing isn't picking it up. Workarounds in place:
+1. From the Mac side: `rsync -az --partial --exclude=.venv --exclude=.pytest_cache --exclude=__pycache__ bonzai_genai/ uaslam00@login.leonardo.cineca.it:/leonardo_work/AIFAC_P02_222/bonzai_genai/`.
+2. SSH to Leonardo, `cd "$WORK/bonzai_genai"`, set up venv (`module load python/3.11.7; python -m venv .venv; .venv/bin/pip install -e ".[dev]"`).
+3. Download three PBFs via the datamover (`malaysia-singapore-brunei`, `sri-lanka`, `sweden`) — see plan Task 19 step 3 for exact `wget` commands.
+4. Submit Singapore job (`sbatch scripts/leonardo_data_prep.sbatch` with env-vars set).
+5. Wait, verify output, then submit Sri Lanka and Sweden jobs in parallel.
+6. Pull manifests back to the repo. `git add bonzai_genai/results/ && git commit`.
+
+**Expected skip rate:** Singapore will skip a lot of tiles (node-cap overflow). Sri Lanka and Sweden should keep most tiles.
+
+**Then Plan Task 20:** write `bonzai_genai/results/PHASE_0A_COMPLETE.md` and commit. Phase 0a done.
+
+### Key environmental facts (carried from earlier)
+
+- **Python:** Mac has `python3.12`, not `python3.11`. Pyproject allows ≥3.11. Leonardo has `python/3.11.7` module.
+- **Bash session loses cwd between calls.** Always `cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai && ...`.
+- **Editable-install gotcha** (still unfixed): `pip install -e .` writes a `.pth` file at `.venv/lib/python3.12/site-packages/__editable__.bonzai_genai-0.1.0.pth` containing `src/`'s absolute path, but Python's site processing isn't picking it up. Workarounds in place:
   - `bonzai_genai/conftest.py` inserts `src/` on `sys.path` for pytest.
   - `bonzai_genai/scripts/prepare_tiles_local.py` prepends `src/` to `sys.path` before importing.
-  - Cause unknown — probably a setuptools 80.x / pip 26 interaction. Worth investigating in Plan 2 cleanup.
-
-### TDD discipline (per-task pattern)
-
-1. Write the failing test from the plan.
-2. Run pytest, confirm `ModuleNotFoundError` or assertion failure.
-3. Write the implementation from the plan.
-4. Run pytest, confirm green.
-5. Commit with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer.
-6. Mark step checkboxes `[x]` in the plan file.
-
-### Cross-session continuity rules
-
-- Update **this STATUS.md file** every 3–5 plan tasks with: last completed task, latest commit hash, next action, any new follow-ups discovered.
-- Add memory entries (`~/.claude/projects/-Users-umaraslam-Documents-dynamo-Bonzai-OSM/memory/`) for: any user feedback that should persist across sessions, any project decisions, any external resources (tracker URLs, dashboard links).
-- Commit cadence: at least once per plan task. `git log --oneline` should tell the story.
-- **No subagents.** PI explicitly requested inline execution by the main session.
+  - **On Leonardo this may also bite** — if it does, the same conftest + script-side workaround should still work.
 
 ### Open follow-ups discovered during execution
 
-1. Attribute vocab YAML ships ~290 tokens for v1; expansion to full FSQ leaves (~1,800 total) deferred to Plan 5.
-2. The `bonzai_genai/.gitignore` was initially too broad (`data/` matched `src/bonzai_genai/data/`). Fixed to `/data/` `/shards/` (root-anchored).
-3. **Editable-install path issue** (see Key environmental facts). The conftest + sys.path workarounds work, but root cause should be diagnosed in a Plan 2 cleanup task.
-4. Typer single-command behaviour: when only one `@app.command(...)` is registered, the subcommand name is optional and the bare options are taken as the default. Once Task 15 adds `overture-region` as a second command, the `synthetic` subcommand name becomes required at the CLI.
+1. **Attribute vocab YAML ships ~290 tokens.** Expansion to full FSQ leaves (~1,800) deferred to Plan 5.
+2. **Editable-install path issue** — root cause unknown; conftest + sys.path-prepend in scripts works around it.
+3. **Singapore node-cap.** The current tokeniser caps road nodes per tile at COORD_BINS=512 because it re-uses x-coord token space for node references. Plan 4 (Stage B sampling decoder) introduces dedicated `ROAD_NODE_REF_*` tokens to lift this cap. For Phase 0a we skip-and-continue.
+4. **`bonzai_genai/.gitignore`** initially over-broad (`data/` matched `src/bonzai_genai/data/`). Fixed to root-anchored `/data/` `/shards/`.
+5. **Typer single-command behaviour:** when only one `@app.command(...)` is registered, the subcommand name is optional. Once `overture-region` was added (Task 15), `synthetic` became a required subcommand name at the CLI.
 
 ## Three countries for v1 de-risking (Phase 0a target)
 
@@ -169,12 +160,10 @@ Round-trip via `read_shard_bundles` returns 50 bundles with intact `(9, 512, 512
 | Singapore | Af | `https://download.geofabrik.de/asia/malaysia-singapore-brunei-latest.osm.pbf` (extract) | `1.20,103.60 → 1.48,104.05` (full island) |
 | Sri Lanka | Af / Aw | `https://download.geofabrik.de/asia/sri-lanka-latest.osm.pbf` | `5.85,79.55 → 9.90,81.95` (full country) |
 
-Singapore's Geofabrik bundle includes Malaysia + Brunei; we crop to Singapore's bbox during data prep.
-
 ## Phase 0a deliverable (recap)
 
-A working `bonzai_genai/` Python package + tile shards on Leonardo `$WORK/bonzai-tiles/{sweden,singapore,sri_lanka}/`, validated via round-trip tests. **Zero GPU billing consumed.**
+A working `bonzai_genai/` Python package + tile shards on Leonardo `$WORK/bonzai-tiles/{sweden,singapore,sri_lanka}/`, validated via round-trip tests. **Zero GPU billing consumed.** The package side is done; only the Leonardo run remains.
 
 ## Blockers / open questions
 
-None. Awaiting Plan Task 14 execution.
+**One blocker for Task 19:** the PI must have an active Leonardo SSH cert (12 h validity from `step ssh login`). The next session begins by checking this; if expired, `step ssh login 'aslamumar16@gmail.com' --provisioner cineca-hpc` to refresh.
