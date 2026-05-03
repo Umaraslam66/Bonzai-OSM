@@ -52,5 +52,80 @@ def cmd_synthetic(
     console.print(f"[bold green]Wrote {n} synthetic tiles to {output}")
 
 
+@app.command("overture-region")
+def cmd_overture_region(
+    pbf: Path = typer.Option(..., help="Path to .osm.pbf file"),
+    sw_lat: float = typer.Option(..., help="SW corner latitude"),
+    sw_lon: float = typer.Option(..., help="SW corner longitude"),
+    ne_lat: float = typer.Option(..., help="NE corner latitude"),
+    ne_lon: float = typer.Option(..., help="NE corner longitude"),
+    output: Path = typer.Option(..., "-o", "--output"),
+    country: str = typer.Option("SG", "--country"),
+    koppen: str = typer.Option("Af", "--koppen"),
+    shard_size: int = typer.Option(100, "--shard-size"),
+    max_tiles: int = typer.Option(1000, "--max-tiles"),
+) -> None:
+    """Generate tile bundles for every tile in (sw, ne) bbox from an OSM PBF.
+
+    Used for Phase 0a Sweden + Singapore + Sri Lanka validation runs.
+    """
+    from bonzai_genai.data.sampling import (
+        extract_tile_geometry_from_osm,
+        iter_tile_centres,
+    )
+
+    vocab = load_default_vocab()
+    tokeniser = Tokeniser(vocab)
+    writer = ShardWriter(output, shard_size=shard_size)
+
+    centres = list(iter_tile_centres(sw_lat, sw_lon, ne_lat, ne_lon))[:max_tiles]
+    console.print(f"Processing {len(centres)} tiles from {pbf.name}")
+
+    n_kept = 0
+    n_skipped = 0
+    with Progress(console=console) as progress:
+        task_id = progress.add_task("[green]Extracting", total=len(centres))
+        for i, (lat, lon) in enumerate(centres):
+            try:
+                geom = extract_tile_geometry_from_osm(pbf, lat, lon)
+            except Exception as e:
+                console.print(f"  [yellow]skip {i}: {e}")
+                n_skipped += 1
+                progress.update(task_id, advance=1)
+                continue
+            if len(geom.roads) + len(geom.buildings) < 5:
+                # Skip near-empty tiles
+                n_skipped += 1
+                progress.update(task_id, advance=1)
+                continue
+            try:
+                raster = rasterise(geom)
+                tokens = tokeniser.encode(geom)
+            except KeyError as e:
+                console.print(f"  [yellow]vocab miss tile {i}: {e}")
+                n_skipped += 1
+                progress.update(task_id, advance=1)
+                continue
+            except ValueError as e:
+                # e.g. >COORD_BINS road nodes in a dense urban tile.
+                # Plan 4 (Stage B) introduces dedicated node-ref tokens to lift this cap.
+                console.print(f"  [yellow]encode overflow tile {i}: {e}")
+                n_skipped += 1
+                progress.update(task_id, advance=1)
+                continue
+            meta = TileMetadata(
+                tile_id=f"{country}-{i:06d}",
+                sw_lat=lat, sw_lon=lon,
+                country=country, koppen=koppen,
+                density_bucket="urban",
+                primary_land_use="residential",
+            )
+            writer.write(TileBundle(raster=raster, tokens=tokens, metadata=meta))
+            n_kept += 1
+            progress.update(task_id, advance=1)
+    writer.close()
+    console.print(f"[bold green]Kept {n_kept} tiles, skipped {n_skipped}")
+
+
 if __name__ == "__main__":
     app()
