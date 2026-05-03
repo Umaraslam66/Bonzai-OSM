@@ -1,0 +1,56 @@
+"""Generate tile bundles into WebDataset shards.
+
+Two modes:
+    synthetic        — procedural smoke data (no real OSM)
+    overture-region  — real OSM data for a bbox (Phase 0.5+; Task 14 adds the sampler)
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import typer
+from rich.console import Console
+from rich.progress import Progress
+
+from bonzai_genai.data.rasteriser import rasterise
+from bonzai_genai.data.shard_writer import ShardWriter
+from bonzai_genai.data.tile_bundle import TileBundle, TileMetadata
+from bonzai_genai.synth.procedural import generate_synthetic_tile
+from bonzai_genai.vocab.attributes import load_default_vocab
+from bonzai_genai.vocab.tokeniser import Tokeniser
+
+app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
+console = Console()
+
+
+@app.command("synthetic")
+def cmd_synthetic(
+    output: Path = typer.Option(..., "-o", "--output", help="Output directory for shards"),
+    n: int = typer.Option(100, "-n", help="Number of synthetic tiles"),
+    shard_size: int = typer.Option(50, "--shard-size"),
+    seed_base: int = typer.Option(0, "--seed-base"),
+) -> None:
+    """Generate n synthetic procedural tiles into WebDataset shards."""
+    vocab = load_default_vocab()
+    tokeniser = Tokeniser(vocab)
+    writer = ShardWriter(output, shard_size=shard_size)
+    with Progress(console=console) as progress:
+        task_id = progress.add_task("[green]Generating", total=n)
+        for i in range(n):
+            geom = generate_synthetic_tile(seed=seed_base + i)
+            raster = rasterise(geom)
+            tokens = tokeniser.encode(geom)
+            meta = TileMetadata(
+                tile_id=f"SYN-{i:06d}",
+                sw_lat=0.0, sw_lon=0.0,
+                country="SYN", koppen="N/A",
+                density_bucket="urban", primary_land_use="residential",
+            )
+            writer.write(TileBundle(raster=raster, tokens=tokens, metadata=meta))
+            progress.update(task_id, advance=1)
+    writer.close()
+    console.print(f"[bold green]Wrote {n} synthetic tiles to {output}")
+
+
+if __name__ == "__main__":
+    app()
