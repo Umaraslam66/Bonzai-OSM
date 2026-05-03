@@ -1006,7 +1006,7 @@ git commit -m "feat(vocab): add attribute vocabulary loader"
 - Create: `bonzai_genai/src/bonzai_genai/vocab/tokeniser.py`
 - Create: `bonzai_genai/tests/test_tokeniser.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_tokeniser.py`:
 
@@ -1114,12 +1114,12 @@ def test_unknown_attribute_raises(tokeniser):
         tokeniser.encode(geom)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_tokeniser.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement the tokeniser**
+- [x] **Step 3: Implement the tokeniser**
 
 Write `bonzai_genai/src/bonzai_genai/vocab/tokeniser.py`:
 
@@ -1367,12 +1367,12 @@ class Tokeniser:
         return out
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_tokeniser.py -v`
 Expected: 6 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/vocab/tokeniser.py bonzai_genai/tests/test_tokeniser.py
@@ -1386,7 +1386,7 @@ git commit -m "feat(vocab): add geometry-to-token encoder and decoder"
 **Files:**
 - Modify: `bonzai_genai/tests/test_tokeniser.py` (append cases)
 
-- [ ] **Step 1: Write the failing test (append to existing file)**
+- [x] **Step 1: Write the failing test (append to existing file)**
 
 Append to `bonzai_genai/tests/test_tokeniser.py`:
 
@@ -1427,12 +1427,12 @@ def test_roundtrip_empty_tile(tokeniser):
     assert decoded.pois == []
 ```
 
-- [ ] **Step 2: Run tests**
+- [x] **Step 2: Run tests**
 
 Run: `.venv/bin/pytest tests/test_tokeniser.py -v`
 Expected: 8 tests pass (all 6 prior + 2 new).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add bonzai_genai/tests/test_tokeniser.py
@@ -1448,7 +1448,7 @@ git commit -m "test(vocab): add round-trip property tests for tokeniser"
 - Create: `bonzai_genai/src/bonzai_genai/data/rasteriser.py`
 - Create: `bonzai_genai/tests/test_rasteriser.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_rasteriser.py`:
 
@@ -1543,12 +1543,12 @@ def test_pois_do_not_paint_raster():
     assert raster.sum() == 0  # POIs live only in vector tokens
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_rasteriser.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Create data package init**
+- [x] **Step 3: Create data package init**
 
 Write `bonzai_genai/src/bonzai_genai/data/__init__.py`:
 
@@ -1556,7 +1556,7 @@ Write `bonzai_genai/src/bonzai_genai/data/__init__.py`:
 """Data prep — tiling, rasterisation, vector serialisation, sharding."""
 ```
 
-- [ ] **Step 4: Implement rasteriser**
+- [x] **Step 4: Implement rasteriser**
 
 Write `bonzai_genai/src/bonzai_genai/data/rasteriser.py`:
 
@@ -1712,12 +1712,12 @@ def rasterise(geom: TileGeometry) -> np.ndarray:
     return raster
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_rasteriser.py -v`
 Expected: 8 tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/data/__init__.py bonzai_genai/src/bonzai_genai/data/rasteriser.py bonzai_genai/tests/test_rasteriser.py
@@ -1732,7 +1732,7 @@ git commit -m "feat(data): add 9-channel rasteriser for vector tile geometry"
 - Create: `bonzai_genai/src/bonzai_genai/data/tile_bundle.py`
 - Create: `bonzai_genai/tests/test_tile_bundle.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_tile_bundle.py`:
 
@@ -1806,12 +1806,12 @@ def test_bundle_from_dict_roundtrip():
     assert restored.metadata == bundle.metadata
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_tile_bundle.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement TileBundle**
+- [x] **Step 3: Implement TileBundle**
 
 Write `bonzai_genai/src/bonzai_genai/data/tile_bundle.py`:
 
@@ -1887,12 +1887,12 @@ class TileBundle:
         return cls(raster=raster, tokens=tokens, metadata=metadata)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_tile_bundle.py -v`
 Expected: 5 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/data/tile_bundle.py bonzai_genai/tests/test_tile_bundle.py
@@ -1907,7 +1907,7 @@ git commit -m "feat(data): add TileBundle dataclass with raster/tokens/metadata"
 - Create: `bonzai_genai/src/bonzai_genai/data/shard_writer.py`
 - Create: `bonzai_genai/tests/test_shard_writer.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_shard_writer.py`:
 
@@ -1986,12 +1986,12 @@ def test_writer_writes_manifest():
         assert manifest.exists()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_shard_writer.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement ShardWriter**
+- [x] **Step 3: Implement ShardWriter**
 
 Write `bonzai_genai/src/bonzai_genai/data/shard_writer.py`:
 
@@ -2097,12 +2097,12 @@ def read_shard_bundles(shard_dir: Path) -> Iterator[TileBundle]:
                 yield TileBundle.from_dict(current)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_shard_writer.py -v`
 Expected: 4 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/data/shard_writer.py bonzai_genai/tests/test_shard_writer.py
@@ -2118,7 +2118,7 @@ git commit -m "feat(data): add WebDataset-format shard writer and reader"
 - Create: `bonzai_genai/src/bonzai_genai/synth/procedural.py`
 - Create: `bonzai_genai/tests/test_synth.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_synth.py`:
 
@@ -2160,12 +2160,12 @@ def test_seed_determinism():
         assert g1.buildings[0].vertices == g2.buildings[0].vertices
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_synth.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Create synth package init**
+- [x] **Step 3: Create synth package init**
 
 Write `bonzai_genai/src/bonzai_genai/synth/__init__.py`:
 
@@ -2173,7 +2173,7 @@ Write `bonzai_genai/src/bonzai_genai/synth/__init__.py`:
 """Synthetic procedural city generator for smoke tests."""
 ```
 
-- [ ] **Step 4: Implement the procedural generator**
+- [x] **Step 4: Implement the procedural generator**
 
 Write `bonzai_genai/src/bonzai_genai/synth/procedural.py`:
 
@@ -2251,12 +2251,12 @@ def generate_synthetic_tile(seed: int = 0) -> TileGeometry:
     return TileGeometry(land=[], roads=roads, buildings=buildings, pois=pois)
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_synth.py -v`
 Expected: 3 tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/synth/__init__.py bonzai_genai/src/bonzai_genai/synth/procedural.py bonzai_genai/tests/test_synth.py
@@ -2270,7 +2270,7 @@ git commit -m "feat(synth): add deterministic procedural tile generator"
 **Files:**
 - Create: `bonzai_genai/tests/test_round_trip.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_round_trip.py`:
 
@@ -2344,17 +2344,17 @@ def test_full_pipeline_synthetic_round_trip():
         assert iou > 0.85, f"building IoU = {iou:.3f}"
 ```
 
-- [ ] **Step 2: Run test to verify it passes**
+- [x] **Step 2: Run test to verify it passes**
 
 Run: `.venv/bin/pytest tests/test_round_trip.py -v`
 Expected: PASS.
 
-- [ ] **Step 3: Run the full test suite to verify nothing regressed**
+- [x] **Step 3: Run the full test suite to verify nothing regressed**
 
 Run: `.venv/bin/pytest -v`
 Expected: ALL prior tests PASS plus this new one.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add bonzai_genai/tests/test_round_trip.py
@@ -2370,7 +2370,7 @@ git commit -m "test(integration): add end-to-end synthetic round-trip test"
 - Create: `bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py`
 - Create: `bonzai_genai/scripts/prepare_tiles_local.py`
 
-- [ ] **Step 1: Implement the CLI**
+- [x] **Step 1: Implement the CLI**
 
 Write `bonzai_genai/src/bonzai_genai/cli/__init__.py`:
 
@@ -2452,7 +2452,7 @@ if __name__ == "__main__":
     app()
 ```
 
-- [ ] **Step 2: Run the smoke job**
+- [x] **Step 2: Run the smoke job**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
@@ -2461,7 +2461,7 @@ cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
 
 Expected: progress bar shows 100 tiles processed, two shard files created in `/tmp/bonzai-syn/`.
 
-- [ ] **Step 3: Verify shards are readable**
+- [x] **Step 3: Verify shards are readable**
 
 ```bash
 .venv/bin/python -c "
@@ -2476,7 +2476,7 @@ print(f'First tokens length: {len(bundles[0].tokens)}')
 
 Expected: `Read back 100 bundles`, raster shape `(9, 512, 512)`, tokens length > 0.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/cli/__init__.py bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py bonzai_genai/scripts/prepare_tiles_local.py
