@@ -79,7 +79,7 @@ Bonzai-OSM/
 - Create: `bonzai_genai/src/bonzai_genai/__init__.py`
 - Create: `bonzai_genai/.gitignore`
 
-- [ ] **Step 1: Create the directory and pyproject.toml**
+- [x] **Step 1: Create the directory and pyproject.toml**
 
 ```bash
 mkdir -p /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai/src/bonzai_genai
@@ -140,7 +140,7 @@ target-version = "py311"
 select = ["E", "F", "I", "N", "B", "UP"]
 ```
 
-- [ ] **Step 2: Create src package init**
+- [x] **Step 2: Create src package init**
 
 Write `bonzai_genai/src/bonzai_genai/__init__.py`:
 
@@ -150,7 +150,7 @@ Write `bonzai_genai/src/bonzai_genai/__init__.py`:
 __version__ = "0.1.0"
 ```
 
-- [ ] **Step 3: Create local .gitignore**
+- [x] **Step 3: Create local .gitignore**
 
 Write `bonzai_genai/.gitignore`:
 
@@ -170,7 +170,7 @@ data/
 shards/
 ```
 
-- [ ] **Step 4: Verify structure**
+- [x] **Step 4: Verify structure**
 
 Run: `ls -la /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai/`
 Expected: `pyproject.toml`, `.gitignore`, `src/`, `tests/`, `configs/`, `scripts/`
