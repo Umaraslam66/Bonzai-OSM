@@ -189,7 +189,7 @@ git commit -m "feat(bonzai_genai): scaffold package structure"
 **Files:**
 - No code changes; environment setup only.
 
-- [ ] **Step 1: Create venv and install in editable mode**
+- [x] **Step 1: Create venv and install in editable mode**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
@@ -200,7 +200,7 @@ python3.11 -m venv .venv
 
 Expected: clean install with no errors.
 
-- [ ] **Step 2: Verify pytest discovery works on empty test dir**
+- [x] **Step 2: Verify pytest discovery works on empty test dir**
 
 ```bash
 cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
@@ -217,7 +217,7 @@ Expected: `no tests ran in 0.0xs` (zero tests, no errors).
 - Create: `bonzai_genai/src/bonzai_genai/config.py`
 - Create: `bonzai_genai/tests/test_config.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_config.py`:
 
@@ -270,12 +270,12 @@ def test_channel_names_match_spec_order():
     assert list(CHANNEL_NAMES) == expected
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_config.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'bonzai_genai.config'`
 
-- [ ] **Step 3: Write the config module**
+- [x] **Step 3: Write the config module**
 
 Write `bonzai_genai/src/bonzai_genai/config.py`:
 
@@ -316,7 +316,7 @@ DENSITY_BUCKETS: tuple[str, ...] = ("rural", "suburban", "urban", "dense_urban")
 KOPPEN_GROUPS: tuple[str, ...] = ("tropical", "arid", "temperate", "continental", "polar")
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_config.py -v`
 Expected: 5 tests pass.
