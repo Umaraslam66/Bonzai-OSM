@@ -175,7 +175,7 @@ shards/
 Run: `ls -la /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai/`
 Expected: `pyproject.toml`, `.gitignore`, `src/`, `tests/`, `configs/`, `scripts/`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bonzai_genai/pyproject.toml bonzai_genai/.gitignore bonzai_genai/src/bonzai_genai/__init__.py
@@ -321,7 +321,7 @@ KOPPEN_GROUPS: tuple[str, ...] = ("tropical", "arid", "temperate", "continental"
 Run: `.venv/bin/pytest tests/test_config.py -v`
 Expected: 5 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/config.py bonzai_genai/tests/test_config.py
@@ -337,7 +337,7 @@ git commit -m "feat(config): add global tile and channel constants"
 - Create: `bonzai_genai/src/bonzai_genai/vocab/tokens.py`
 - Create: `bonzai_genai/tests/test_tokens.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_tokens.py`:
 
@@ -405,12 +405,12 @@ def test_coord_token_id_rejects_out_of_range():
         coord_y_token_id(COORD_BINS)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_tokens.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'bonzai_genai.vocab'`
 
-- [ ] **Step 3: Create vocab package init**
+- [x] **Step 3: Create vocab package init**
 
 Write `bonzai_genai/src/bonzai_genai/vocab/__init__.py`:
 
@@ -418,7 +418,7 @@ Write `bonzai_genai/src/bonzai_genai/vocab/__init__.py`:
 """Vocabulary definitions for the Inker."""
 ```
 
-- [ ] **Step 4: Implement tokens module**
+- [x] **Step 4: Implement tokens module**
 
 Write `bonzai_genai/src/bonzai_genai/vocab/tokens.py`:
 
@@ -492,12 +492,12 @@ def parse_coord_y_token(token_id: int) -> int:
     return token_id - base
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_tokens.py -v`
 Expected: 7 tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bonzai_genai/src/bonzai_genai/vocab/__init__.py bonzai_genai/src/bonzai_genai/vocab/tokens.py bonzai_genai/tests/test_tokens.py
@@ -513,7 +513,7 @@ git commit -m "feat(vocab): add special and coordinate token id space"
 - Create: `bonzai_genai/configs/attributes_v1.yaml`
 - Create: `bonzai_genai/tests/test_attributes.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Write `bonzai_genai/tests/test_attributes.py`:
 
@@ -579,12 +579,12 @@ def test_height_tokens_quantised():
         assert h in vocab
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/pytest tests/test_attributes.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Create the attribute vocab YAML**
+- [x] **Step 3: Create the attribute vocab YAML**
 
 Write `bonzai_genai/configs/attributes_v1.yaml`:
 
@@ -903,7 +903,7 @@ unknown:
 
 (This file is intentionally smaller than the eventual ~1,800-token target — for v1 development we expand it later by joining FSQ leaf categories. For Phase 0a, we ship with ~280 tokens and grow the file in Plan 5 / production.)
 
-- [ ] **Step 4: Implement attributes module**
+- [x] **Step 4: Implement attributes module**
 
 Write `bonzai_genai/src/bonzai_genai/vocab/attributes.py`:
 
@@ -984,14 +984,14 @@ def load_default_vocab() -> AttributeVocab:
     return AttributeVocab(names)
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_attributes.py -v`
 Expected: 7 tests pass.
 
 If `test_vocab_size_in_expected_range` fails because the YAML produces fewer than 1,200 entries, expand the YAML with additional poi categories (the FSQ leaves we'll fully integrate in Plan 5). For v1 Phase 0a, set the lower bound to whatever the YAML produces and document expansion as a Plan 5 task. Update the test bound to `assert 200 <= len(vocab) <= 2400`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bonzai_genai/configs/attributes_v1.yaml bonzai_genai/src/bonzai_genai/vocab/attributes.py bonzai_genai/tests/test_attributes.py
