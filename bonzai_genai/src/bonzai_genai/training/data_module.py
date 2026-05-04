@@ -22,12 +22,22 @@ def _decode_bundle(sample: dict) -> dict:
     """Decode a WebDataset sample into native Python objects.
 
     The shard format from ``ShardWriter`` puts ``raster.npy`` (np.save'd
-    float32 array) and ``tokens.json`` (JSON list of ints) into each
-    record. WebDataset gives us those as raw bytes.
+    float32 array), ``tokens.json`` (JSON list of ints), and
+    ``metadata.json`` (TileMetadata as JSON) into each record. We surface
+    ``country`` so the country-balanced sampler has something to weight by.
     """
     raster = np.load(io.BytesIO(sample["raster.npy"]))
     tokens = json.loads(sample["tokens.json"].decode("utf-8"))
-    return {"raster": raster.astype(np.float32), "tokens": np.asarray(tokens, dtype=np.int64)}
+    if "metadata.json" in sample:
+        meta = json.loads(sample["metadata.json"].decode("utf-8"))
+        country = meta.get("country", "unknown")
+    else:
+        country = "unknown"
+    return {
+        "raster": raster.astype(np.float32),
+        "tokens": np.asarray(tokens, dtype=np.int64),
+        "country": country,
+    }
 
 
 def _collate_raster_only(items: list[dict]) -> torch.Tensor:

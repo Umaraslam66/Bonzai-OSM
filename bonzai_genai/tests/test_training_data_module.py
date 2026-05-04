@@ -60,3 +60,51 @@ def test_data_module_yields_raster_and_tokens_batch(syn_corpus):
     assert batch["tokens"].dtype == torch.long
     # token_lens are real lengths before pad
     assert (batch["token_lens"] <= 4096).all()
+
+
+def _np_save_bytes(arr):
+    import io
+
+    import numpy as np
+    buf = io.BytesIO()
+    np.save(buf, arr)
+    return buf.getvalue()
+
+
+def test_data_module_decoded_sample_has_country():
+    """Each decoded sample must expose its TileMetadata.country string.
+
+    Country lives in the .json sidecar of each WebDataset record. Without
+    surfacing it the country-balanced sampler (T3) has nothing to weight by.
+    """
+    import json
+
+    import numpy as np
+
+    from bonzai_genai.training.data_module import _decode_bundle
+
+    fake_sample = {
+        "raster.npy": _np_save_bytes(np.zeros((9, 512, 512), dtype=np.float32)),
+        "tokens.json": b"[1,2,3]",
+        "metadata.json": json.dumps({
+            "tile_id": "synth-0", "sw_lat": 0.0, "sw_lon": 0.0,
+            "country": "synth", "koppen": "Af",
+            "density_bucket": "rural", "primary_land_use": "green",
+        }).encode(),
+    }
+    decoded = _decode_bundle(fake_sample)
+    assert "country" in decoded
+    assert decoded["country"] == "synth"
+
+
+def test_data_module_decoded_sample_falls_back_to_unknown_country():
+    """If a record has no metadata.json (older shards), country is 'unknown'."""
+    import numpy as np
+
+    from bonzai_genai.training.data_module import _decode_bundle
+    fake_sample = {
+        "raster.npy": _np_save_bytes(np.zeros((9, 512, 512), dtype=np.float32)),
+        "tokens.json": b"[1,2,3]",
+    }
+    decoded = _decode_bundle(fake_sample)
+    assert decoded["country"] == "unknown"
