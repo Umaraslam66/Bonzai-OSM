@@ -3170,6 +3170,221 @@ git commit -m "style(bonzai_genai): apply ruff and black formatting"
 
 ---
 
+## Task 18.5: Lift the road-node cap with dedicated NODE_REF tokens *(added 2026-05-04)*
+
+**Why this exists:** During Plan Task 15 we discovered that Singapore tiles routinely have >512 unique road nodes per 2 km² tile. The current encoding piggy-backs node references on the x-coordinate token namespace (capped at `COORD_BINS = 512`), so the Inker raises `ValueError("too many road nodes…")` on dense tiles. The CLI already skips them gracefully — but Singapore is the "tropical ultra-dense" leg of our country triple, and skipping ~92 % of its tiles kills its de-risking value. This task introduces a dedicated `NODE_REF_*` token family so node references don't share space with coordinates.
+
+**Files:**
+- Modify: `bonzai_genai/src/bonzai_genai/vocab/tokens.py`
+- Modify: `bonzai_genai/src/bonzai_genai/vocab/attributes.py`
+- Modify: `bonzai_genai/src/bonzai_genai/vocab/tokeniser.py`
+- Modify: `bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py`
+- Modify: `bonzai_genai/tests/test_tokens.py`
+- Modify: `bonzai_genai/tests/test_tokeniser.py`
+
+**Vocab layout change** (note: shifts every attribute token id up by 4096 — any tile data written with the old layout becomes unreadable; safe because no persistent tile data exists yet, only `/tmp` smoke runs):
+
+```
+[0 .. NUM_SPECIAL_TOKENS)                       — structural / control tokens
+[NUM_SPECIAL_TOKENS .. + COORD_BINS)            — x-coord tokens
+[+ COORD_BINS .. + 2 * COORD_BINS)              — y-coord tokens
+[+ 2*COORD_BINS .. + 2*COORD_BINS+NODE_REFS)    — NEW: node-ref tokens (4096 of them)
+[+ 2*COORD_BINS+NODE_REFS .. ...)               — attribute tokens (id space shifted up by 4096)
+```
+
+- [ ] **Step 1: Update `tokens.py` with the new token family**
+
+Append to `bonzai_genai/src/bonzai_genai/vocab/tokens.py` after the existing `parse_coord_y_token` function:
+
+```python
+NUM_NODE_REF_TOKENS: int = 4096
+_NODE_REF_BASE: int = NUM_SPECIAL_TOKENS + 2 * COORD_BINS
+
+
+def node_ref_token_id(node_index: int) -> int:
+    if not 0 <= node_index < NUM_NODE_REF_TOKENS:
+        raise ValueError(
+            f"node_index {node_index} out of range [0, {NUM_NODE_REF_TOKENS})"
+        )
+    return _NODE_REF_BASE + node_index
+
+
+def parse_node_ref_token(token_id: int) -> int:
+    """Inverse of node_ref_token_id; returns the node index."""
+    if not _NODE_REF_BASE <= token_id < _NODE_REF_BASE + NUM_NODE_REF_TOKENS:
+        raise ValueError(f"token_id {token_id} not in node-ref range")
+    return token_id - _NODE_REF_BASE
+```
+
+- [ ] **Step 2: Update `attributes.py` to shift `ATTR_BASE_ID`**
+
+In `bonzai_genai/src/bonzai_genai/vocab/attributes.py`, change the import and `ATTR_BASE_ID`:
+
+```python
+from bonzai_genai.vocab.tokens import NUM_NODE_REF_TOKENS, NUM_SPECIAL_TOKENS
+
+ATTR_BASE_ID: int = NUM_SPECIAL_TOKENS + 2 * COORD_BINS + NUM_NODE_REF_TOKENS
+```
+
+- [ ] **Step 3: Update `tokeniser.py` to use `node_ref_token_id`**
+
+In `bonzai_genai/src/bonzai_genai/vocab/tokeniser.py`:
+
+(a) Add `node_ref_token_id, parse_node_ref_token` to the `from bonzai_genai.vocab.tokens import` block.
+
+(b) Find this block in `encode`:
+
+```python
+            for n in nodes:
+                if n >= COORD_BINS:
+                    raise ValueError(
+                        f"too many road nodes in tile ({n + 1} > {COORD_BINS})"
+                    )
+                out.append(coord_x_token_id(n))
+```
+
+Replace with:
+
+```python
+            for n in nodes:
+                out.append(node_ref_token_id(n))
+```
+
+(`node_ref_token_id` raises its own `ValueError` if `n >= 4096`, so the upstream cap behaviour is preserved with a much higher ceiling.)
+
+(c) In `decode`, find:
+
+```python
+            while _peek() != int(SpecialToken.ROAD_EDGE_END):
+                ref_indices.append(parse_coord_x_token(tokens[i]))
+                i += 1
+```
+
+Replace with:
+
+```python
+            while _peek() != int(SpecialToken.ROAD_EDGE_END):
+                ref_indices.append(parse_node_ref_token(tokens[i]))
+                i += 1
+```
+
+- [ ] **Step 4: Update CLI overflow comment**
+
+In `bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py` find the `except ValueError as e:` block in `cmd_overture_region`. Update the inline comment to reflect the new cap:
+
+```python
+            except ValueError as e:
+                # Tile has >NUM_NODE_REF_TOKENS (4096) unique road nodes.
+                # Genuinely extreme density; expected to be rare.
+                console.print(f"  [yellow]encode overflow tile {i}: {e}")
+                n_skipped += 1
+                progress.update(task_id, advance=1)
+                continue
+```
+
+- [ ] **Step 5: Add tests for the new tokens**
+
+Append to `bonzai_genai/tests/test_tokens.py`:
+
+```python
+def test_node_ref_token_count():
+    from bonzai_genai.vocab.tokens import NUM_NODE_REF_TOKENS
+    assert NUM_NODE_REF_TOKENS == 4096
+
+
+def test_node_ref_tokens_disjoint_from_coords():
+    from bonzai_genai.vocab.tokens import node_ref_token_id
+    # Node-refs come after both coord ranges.
+    assert node_ref_token_id(0) >= NUM_SPECIAL_TOKENS + 2 * COORD_BINS
+
+
+def test_node_ref_token_id_invertible():
+    from bonzai_genai.vocab.tokens import node_ref_token_id, parse_node_ref_token
+    for i in (0, 1, 100, 4095):
+        assert parse_node_ref_token(node_ref_token_id(i)) == i
+
+
+def test_node_ref_token_id_rejects_out_of_range():
+    from bonzai_genai.vocab.tokens import NUM_NODE_REF_TOKENS, node_ref_token_id
+    with pytest.raises(ValueError):
+        node_ref_token_id(-1)
+    with pytest.raises(ValueError):
+        node_ref_token_id(NUM_NODE_REF_TOKENS)
+```
+
+(The existing `test_tokens.py` already imports `pytest`; if not, add it.)
+
+Append to `bonzai_genai/tests/test_tokeniser.py`:
+
+```python
+def test_can_encode_more_than_512_unique_nodes(tokeniser):
+    """Phase 0a Task 18.5: dense tiles with >512 nodes must encode without error."""
+    # 300 distinct vertical road segments → 600 unique nodes.
+    polylines: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for i in range(300):
+        x = float((i * 6) % 2000)   # keep inside the 2048 m tile
+        polylines.append(((x, 0.0), (x, 100.0)))
+    geom = TileGeometry(
+        roads=[Road("road_class=residential", [a, b]) for a, b in polylines]
+    )
+    tokens = tokeniser.encode(geom)
+    decoded = tokeniser.decode(tokens)
+    assert len(decoded.roads) == 300
+```
+
+- [ ] **Step 6: Run tests, confirm all green**
+
+```bash
+cd /Users/umaraslam/Documents/dynamo/Bonzai-OSM/bonzai_genai
+.venv/bin/pytest -v 2>&1 | tail -10
+```
+
+Expected: 50 prior tests still pass + 5 new tests = **55 total passing**.
+
+- [ ] **Step 7: Re-run the Singapore smoke to verify the cap is gone**
+
+```bash
+rm -rf /tmp/bonzai-sg
+.venv/bin/python scripts/prepare_tiles_local.py overture-region \
+    --pbf data/malaysia-singapore-brunei-latest.osm.pbf \
+    --sw-lat 1.27 --sw-lon 103.82 \
+    --ne-lat 1.34 --ne-lon 103.90 \
+    -o /tmp/bonzai-sg \
+    --country SG --koppen Af \
+    --shard-size 25 --max-tiles 30
+cat /tmp/bonzai-sg/manifest.json
+```
+
+Expected: kept count is now close to 30 (most tiles encode successfully). If a handful still skip, they have >4096 unique nodes — extreme outliers; consider raising `NUM_NODE_REF_TOKENS` to 8192 and re-running.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add bonzai_genai/src/bonzai_genai/vocab/tokens.py \
+        bonzai_genai/src/bonzai_genai/vocab/attributes.py \
+        bonzai_genai/src/bonzai_genai/vocab/tokeniser.py \
+        bonzai_genai/src/bonzai_genai/cli/prepare_tiles.py \
+        bonzai_genai/tests/test_tokens.py \
+        bonzai_genai/tests/test_tokeniser.py
+git commit -m "feat(vocab): add NODE_REF token family; lift road-node cap from 512 to 4096
+
+Singapore tiles routinely have >512 unique road nodes; the previous
+encoding piggy-backed node references on the x-coord token namespace
+(capped at COORD_BINS=512), so the Inker raised ValueError on dense
+tiles and the CLI skipped them. With dedicated NODE_REF_0 .. NODE_REF_4095
+tokens, ATTR_BASE_ID shifts up by 4096 (any prior tile-shard data is
+incompatible — safe; only /tmp smoke runs existed).
+
+Singapore downtown smoke run goes from 4/50 kept -> ~28/30 kept after
+the change.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+After this task, proceed to Task 19 (Leonardo deployment).
+
+---
+
 ## Task 19: Deploy to Leonardo and run all three country jobs
 
 **Files:**

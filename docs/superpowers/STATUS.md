@@ -14,8 +14,8 @@
 | Active phase | **Phase 0a — Data Prep Pipeline + 3-country tile dataset** |
 | Active plan | [`plans/2026-05-03-phase-0a-data-prep-pipeline.md`](plans/2026-05-03-phase-0a-data-prep-pipeline.md) (20 tasks) |
 | Last completed plan task | **Plan Task 18: Run the full test suite + lint** (commit `18416d4`) |
-| Next action | **Plan Task 19: Deploy to Leonardo and run all three country jobs** *(requires user's active SSH cert)* |
-| Tests passing | **50 / 50** |
+| Next action | **Plan Task 18.5: Lift the road-node cap with dedicated NODE_REF tokens** *(then 19, 20)* |
+| Tests passing | **50 / 50** (will be 55 after Task 18.5) |
 | Ruff lint | **Clean** |
 | GPU-h burned this session | 0 |
 | GPU-h burned cumulative on project | 14 (from prior sessions, pre-v1) |
@@ -64,7 +64,8 @@ cef2396 Add Phase 0a implementation plan for data prep pipeline
 - [x] Task 16: Slurm template for Leonardo
 - [x] Task 17: Package README
 - [x] Task 18: Full test suite + ruff
-- [ ] **Task 19: Deploy to Leonardo and run all three country jobs ← NEXT (needs your SSH cert)**
+- [ ] **Task 18.5: Lift road-node cap with NODE_REF tokens ← NEXT** *(added 2026-05-04 to fix Singapore overflow before Leonardo deploy)*
+- [ ] Task 19: Deploy to Leonardo and run all three country jobs *(needs PI's SSH cert)*
 - [ ] Task 20: Plan completion summary
 
 ## What was built (final tally for Phase 0a code)
@@ -118,9 +119,17 @@ The other 46 tiles overflowed the 512 road-node cap. **This is a known limit of 
 
 ## Notes for the next agent / next session
 
-### How to resume execution (Plan Task 19)
+### How to resume execution
 
-This is the Leonardo deployment task. **Requires the PI's active Leonardo SSH cert** (`step ssh login 'aslamumar16@gmail.com' --provisioner cineca-hpc`).
+**Step 1 — Plan Task 18.5: Lift the road-node cap (do this first; no Leonardo needed)**
+
+The Singapore smoke run from Task 15 hit a 512 road-node cap because node references piggy-backed on the x-coord token namespace. **Task 18.5 (in the plan file) lifts this to 4,096 by adding a dedicated `NODE_REF_*` token family.** Steps 1–8 in the plan are fully spelled out: edit `tokens.py` (add `NUM_NODE_REF_TOKENS = 4096` + `node_ref_token_id` / `parse_node_ref_token`), shift `ATTR_BASE_ID` in `attributes.py`, swap `coord_x_token_id` → `node_ref_token_id` in `tokeniser.py` (encode + decode), update CLI overflow comment, add 5 tests, run pytest (expect 55/55), re-run Singapore smoke (expect ~28/30 kept), commit.
+
+This is a small, contained change (~30 LoC). **No Leonardo SSH cert required for 18.5.**
+
+**Step 2 — Plan Task 19: Deploy to Leonardo and run all three country jobs**
+
+Requires the PI's active Leonardo SSH cert (`step ssh login 'aslamumar16@gmail.com' --provisioner cineca-hpc`).
 
 Execution path:
 
@@ -148,7 +157,7 @@ Execution path:
 
 1. **Attribute vocab YAML ships ~290 tokens.** Expansion to full FSQ leaves (~1,800) deferred to Plan 5.
 2. **Editable-install path issue** — root cause unknown; conftest + sys.path-prepend in scripts works around it.
-3. **Singapore node-cap.** The current tokeniser caps road nodes per tile at COORD_BINS=512 because it re-uses x-coord token space for node references. Plan 4 (Stage B sampling decoder) introduces dedicated `ROAD_NODE_REF_*` tokens to lift this cap. For Phase 0a we skip-and-continue.
+3. **Singapore node-cap (resolved by Task 18.5).** The Phase 0a tokeniser originally capped road nodes per tile at COORD_BINS=512. Task 18.5 (added 2026-05-04) introduces dedicated `NODE_REF_*` tokens to lift this to 4,096. **This is the next action** for the new agent.
 4. **`bonzai_genai/.gitignore`** initially over-broad (`data/` matched `src/bonzai_genai/data/`). Fixed to root-anchored `/data/` `/shards/`.
 5. **Typer single-command behaviour:** when only one `@app.command(...)` is registered, the subcommand name is optional. Once `overture-region` was added (Task 15), `synthetic` became a required subcommand name at the CLI.
 
