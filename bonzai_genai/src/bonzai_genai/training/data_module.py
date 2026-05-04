@@ -12,7 +12,7 @@ from __future__ import annotations
 import io
 import json
 
-import lightning as L
+import lightning as L  # noqa: N812
 import numpy as np
 import torch
 from torch.utils.data import DataLoader

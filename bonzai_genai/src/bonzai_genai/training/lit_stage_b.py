@@ -6,9 +6,9 @@ ground-truth raster — no domain gap; that's Experiment 3's job).
 """
 from __future__ import annotations
 
-import lightning as L
+import lightning as L  # noqa: N812
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from torch.optim import AdamW
 
 from bonzai_genai.models.configs import InkerConfig, RasterEncoderConfig

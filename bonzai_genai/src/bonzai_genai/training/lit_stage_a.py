@@ -11,7 +11,7 @@ Classifier-free guidance: 10% of training drops conditioning to null.
 """
 from __future__ import annotations
 
-import lightning as L
+import lightning as L  # noqa: N812
 import torch
 from torch.optim import AdamW
 

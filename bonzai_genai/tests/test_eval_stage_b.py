@@ -2,8 +2,8 @@
 import pytest
 
 from bonzai_genai.vocab.tokeniser import (
-    Building,
     POI,
+    Building,
     Road,
     TileGeometry,
 )

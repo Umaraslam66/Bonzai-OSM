@@ -1,7 +1,7 @@
 """LightningModule for VAE reconstruction training (Phase 0b smoke + Phase 3 production)."""
 from __future__ import annotations
 
-import lightning as L
+import lightning as L  # noqa: N812
 import torch
 from torch.optim import AdamW
 

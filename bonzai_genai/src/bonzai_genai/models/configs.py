@@ -30,7 +30,7 @@ class VAEConfig:
     spatial_compression: int = 8
 
     @classmethod
-    def from_preset(cls, name: str) -> "VAEConfig":
+    def from_preset(cls, name: str) -> VAEConfig:
         _check_preset(name)
         if name == TinyPreset:
             return cls(base_channels=32)
@@ -48,7 +48,7 @@ class DiTConfig:
     cond_dim: int = 256           # combined conditioning embedding dim
 
     @classmethod
-    def from_preset(cls, name: str) -> "DiTConfig":
+    def from_preset(cls, name: str) -> DiTConfig:
         _check_preset(name)
         if name == TinyPreset:
             return cls(hidden_dim=512, num_layers=12, num_heads=8, cond_dim=256)
@@ -66,7 +66,7 @@ class InkerConfig:
     raster_feat_dim: int = 256    # must match RasterEncoderConfig.output_dim
 
     @classmethod
-    def from_preset(cls, name: str) -> "InkerConfig":
+    def from_preset(cls, name: str) -> InkerConfig:
         _check_preset(name)
         if name == TinyPreset:
             return cls(
@@ -87,7 +87,7 @@ class RasterEncoderConfig:
     output_dim: int = 256
 
     @classmethod
-    def from_preset(cls, name: str) -> "RasterEncoderConfig":
+    def from_preset(cls, name: str) -> RasterEncoderConfig:
         _check_preset(name)
         if name == TinyPreset:
             return cls(base_channels=64, num_layers=3, output_dim=256)
