@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from typing import Final
 
 TinyPreset: Final[str] = "tiny"
+Plan3Preset: Final[str] = "plan3"
 ProductionPreset: Final[str] = "production"
-_PRESETS = (TinyPreset, ProductionPreset)
+_PRESETS = (TinyPreset, Plan3Preset, ProductionPreset)
 
 
 def _check_preset(name: str) -> None:
@@ -34,6 +35,10 @@ class VAEConfig:
         _check_preset(name)
         if name == TinyPreset:
             return cls(base_channels=32)
+        if name == Plan3Preset:
+            # VAE re-used as-is from smoke; small bump to 48 base channels
+            # for Plan 3 reconstruction headroom on real tiles.
+            return cls(base_channels=48)
         return cls(base_channels=64)
 
 
@@ -52,6 +57,9 @@ class DiTConfig:
         _check_preset(name)
         if name == TinyPreset:
             return cls(hidden_dim=512, num_layers=12, num_heads=8, cond_dim=256)
+        if name == Plan3Preset:
+            # ~200M params: 16 layers x hidden 768 x 12 heads
+            return cls(hidden_dim=768, num_layers=16, num_heads=12, cond_dim=512)
         return cls(hidden_dim=1024, num_layers=24, num_heads=16, cond_dim=768)
 
 
@@ -73,6 +81,12 @@ class InkerConfig:
                 hidden_dim=512, num_layers=12, num_heads=8,
                 max_context_len=4096, raster_feat_dim=256,
             )
+        if name == Plan3Preset:
+            # ~300M params: 16 layers x hidden 1024 x 16 heads x ctx 8k
+            return cls(
+                hidden_dim=1024, num_layers=16, num_heads=16,
+                max_context_len=8192, raster_feat_dim=512,
+            )
         return cls(
             hidden_dim=1280, num_layers=32, num_heads=20,
             max_context_len=16384, raster_feat_dim=768,
@@ -91,4 +105,6 @@ class RasterEncoderConfig:
         _check_preset(name)
         if name == TinyPreset:
             return cls(base_channels=64, num_layers=3, output_dim=256)
+        if name == Plan3Preset:
+            return cls(base_channels=80, num_layers=4, output_dim=512)
         return cls(base_channels=96, num_layers=4, output_dim=768)

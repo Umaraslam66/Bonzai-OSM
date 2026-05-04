@@ -49,3 +49,38 @@ def test_raster_encoder_output_dim():
 def test_unknown_preset_raises():
     with pytest.raises(ValueError, match="unknown preset"):
         DiTConfig.from_preset("medium")
+
+
+from bonzai_genai.models.configs import Plan3Preset  # noqa: E402
+
+
+def test_plan3_preset_is_registered():
+    cfg = DiTConfig.from_preset(Plan3Preset)
+    assert isinstance(cfg, DiTConfig)
+
+
+def test_plan3_dit_sits_between_tiny_and_production():
+    tiny = DiTConfig.from_preset(TinyPreset)
+    plan3 = DiTConfig.from_preset(Plan3Preset)
+    prod = DiTConfig.from_preset(ProductionPreset)
+    assert tiny.hidden_dim < plan3.hidden_dim < prod.hidden_dim
+    assert tiny.num_layers < plan3.num_layers < prod.num_layers
+
+
+def test_plan3_inker_sits_between_tiny_and_production():
+    tiny = InkerConfig.from_preset(TinyPreset)
+    plan3 = InkerConfig.from_preset(Plan3Preset)
+    prod = InkerConfig.from_preset(ProductionPreset)
+    assert tiny.hidden_dim <= plan3.hidden_dim < prod.hidden_dim
+    assert tiny.num_layers < plan3.num_layers <= prod.num_layers
+    assert tiny.max_context_len <= plan3.max_context_len < prod.max_context_len
+
+
+def test_plan3_inker_context_is_8k():
+    plan3 = InkerConfig.from_preset(Plan3Preset)
+    assert plan3.max_context_len == 8192
+
+
+def test_plan3_raster_encoder_output_dim():
+    plan3 = RasterEncoderConfig.from_preset(Plan3Preset)
+    assert plan3.output_dim == 512
