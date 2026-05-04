@@ -51,3 +51,19 @@ def test_dit_block_zero_init_residual_path():
         out = block(x, cond)
     # With zero cond + zero-init gates, output ~= input
     assert torch.allclose(out, x, atol=1e-5), f"max diff = {(out-x).abs().max()}"
+
+
+def test_dit_forward_returns_latent_shape(cfg):
+    dit = DiT(cfg)
+    z = torch.randn(2, cfg.in_channels, 64, 64)
+    t = torch.tensor([100.0, 500.0])
+    out = dit(z, t)
+    assert out.shape == z.shape
+
+
+def test_dit_unconditional_forward_uses_null_cond(cfg):
+    dit = DiT(cfg)
+    z = torch.randn(1, cfg.in_channels, 64, 64)
+    t = torch.tensor([100.0])
+    out_uncond = dit(z, t)  # no cond_text / cond_tags -> null
+    assert out_uncond.shape == z.shape
