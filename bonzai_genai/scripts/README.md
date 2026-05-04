@@ -76,3 +76,63 @@ export BONZAI_OUT=$WORK/bonzai-tiles/sweden
 export BONZAI_MAX_TILES=5000
 sbatch scripts/leonardo_data_prep.sbatch
 ```
+
+## Plan 3 — Experiments 1 + 2 (real Sweden + Singapore + Sri Lanka)
+
+Plan 3 trains a ~200 M Painter and ~300 M Writer on the real-country
+tile shards from Phase 0a. **All training runs use 4-GPU DDP on
+`boost_usr_prod`** — per-node billing means we never use only 1 GPU.
+
+### One-shot orchestrator (recommended)
+
+```bash
+# On Leonardo, after `cd $WORK/bonzai_genai && source .venv/bin/activate`
+export BONZAI_TRAIN_URL="$WORK/bonzai-tiles/{singapore,sri_lanka,sweden}/train/shard-{000000..*}.tar"
+export BONZAI_VAL_URL="$WORK/bonzai-tiles/{singapore,sri_lanka,sweden}/val/shard-000000.tar"
+export BONZAI_OUT="$WORK/bonzai-plan3"
+export BONZAI_VAE_CKPT="$WORK/bonzai-exp0/vae/lightning_logs/version_0/checkpoints/last.ckpt"
+python scripts/run_plan3.py
+```
+
+This:
+1. Scans the train shards once to count `metadata.country` (~10 s).
+2. Computes inverse-proportional weights so Sweden gets dropped most,
+   Singapore kept always.
+3. Submits **two parallel** sbatch jobs — one Painter, one Writer —
+   each requesting all 4 A100s on a `boost_usr_prod` node.
+4. Prints the post-training sample-from-ckpt command.
+
+### Manual single-stage submission
+
+If you want to run just Painter or just Writer:
+
+```bash
+sbatch \
+    --export=ALL,BONZAI_STAGE=stage_a,BONZAI_PRESET=plan3,\
+BONZAI_TRAIN_URL=$BONZAI_TRAIN_URL,BONZAI_VAL_URL=$BONZAI_VAL_URL,\
+BONZAI_OUT=$BONZAI_OUT/stage_a,BONZAI_BATCH_SIZE=64,\
+BONZAI_MAX_EPOCHS=50,BONZAI_VAE_CKPT=$BONZAI_VAE_CKPT,\
+BONZAI_COUNTRY_WEIGHTS_JSON='{"sweden":0.156,"sri_lanka":0.529,"singapore":1.0}' \
+    scripts/leonardo_plan3.sbatch
+```
+
+### Sample-from-checkpoint (after both jobs finish)
+
+```bash
+BONZAI_SAMPLE_FROM_CKPT=1 \
+    BONZAI_CKPT_DIR=$BONZAI_OUT \
+    BONZAI_PRESET=plan3 \
+    BONZAI_SAMPLE_OUT=$BONZAI_OUT/samples \
+    BONZAI_NUM_SAMPLES=64 \
+    python scripts/run_eval.py
+```
+
+Outputs 64 PNGs (`sample_NNN.png`) and 64 GeoJSON files
+(`sample_NNN.geojson`) under `$BONZAI_OUT/samples/`. The eyeball check
+on those PNGs is the headline Plan 3 signal.
+
+### Why 4 GPUs not 1
+
+`boost_usr_prod` bills per node (32 core-h per hour on a 4×A100 box).
+A 1-GPU job for 1 hour costs the same as a 4-GPU job for 1 hour.
+Plan 3 sbatch saturates all 4 — see `feedback_leonardo_full_node.md`.
