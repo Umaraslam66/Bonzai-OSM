@@ -12,3 +12,4 @@ htmlcov/
 # Raw OSM data downloads (top-level only — NOT the src/bonzai_genai/data/ source package)
 /data/
 /shards/
+/checkpoints/
