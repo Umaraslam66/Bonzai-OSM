@@ -104,21 +104,32 @@ class TileDataModule(L.LightningDataModule):
         return_tokens: bool = False,
         max_token_len: int = 4096,
         num_workers: int = 4,
+        balance_by_country: bool = False,
+        country_weights: dict[str, float] | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-    def _build(self, url: str):
+    def _build(self, url: str, *, training: bool):
+        import os
+
         import webdataset as wds
-        ds = (
-            wds.WebDataset(url, shardshuffle=False, empty_check=False)
-            .map(_decode_bundle)
-        )
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        kwargs: dict = dict(shardshuffle=False, empty_check=False)
+        if world_size > 1:
+            kwargs["nodesplitter"] = wds.split_by_node
+        ds = wds.WebDataset(url, **kwargs).map(_decode_bundle)
+        if training and self.hparams.balance_by_country:
+            weights = self.hparams.country_weights or {}
+            rank = int(os.environ.get("RANK", "0"))
+            ds = ds.compose(
+                lambda src: country_balance_filter(src, weights, seed=42 + rank)
+            )
         return ds
 
     def setup(self, stage: str) -> None:
-        self.train_ds = self._build(self.hparams.train_url)
-        self.val_ds = self._build(self.hparams.val_url)
+        self.train_ds = self._build(self.hparams.train_url, training=True)
+        self.val_ds = self._build(self.hparams.val_url, training=False)
 
     def _loader(self, ds, shuffle: bool) -> DataLoader:
         if self.hparams.return_tokens:

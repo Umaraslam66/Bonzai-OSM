@@ -167,3 +167,46 @@ def test_country_balance_filter_rank_seeds_produce_independent_streams():
     # differ in at least 5 of the first 50 positions.
     diffs = sum(1 for a, b in zip(s0[:50], s1[:50], strict=False) if a != b)
     assert diffs > 5, f"only {diffs} differences — sampler not rank-aware"
+
+
+def test_data_module_with_balance_flag_runs_end_to_end(syn_corpus):
+    """When balance_by_country=True, the data module accepts country_weights
+    and runs the rejection filter on the train stream. (Synthetic corpus
+    is single-country -- we just verify the code path runs without error
+    and yields a batch.)
+
+    Note: synthetic tiles use country code "SYN" (see cli/prepare_tiles.py).
+    """
+    from bonzai_genai.training.data_module import TileDataModule
+    dm = TileDataModule(
+        train_url=str(syn_corpus / "train" / "shard-{000000..000001}.tar"),
+        val_url=str(syn_corpus / "val" / "shard-000000.tar"),
+        batch_size=2,
+        return_tokens=False,
+        num_workers=0,
+        balance_by_country=True,
+        country_weights={"SYN": 1.0},
+    )
+    dm.setup("fit")
+    batch = next(iter(dm.train_dataloader()))
+    assert batch.shape == (2, 9, 512, 512)
+
+
+def test_data_module_runs_under_fake_ddp_env(syn_corpus, monkeypatch):
+    """Under DDP, env-vars WORLD_SIZE and RANK are set. The data module
+    must add wds.split_by_node to keep ranks reading disjoint shards.
+    We verify the iteration path doesn't crash with WORLD_SIZE > 1.
+    """
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "0")
+    from bonzai_genai.training.data_module import TileDataModule
+    dm = TileDataModule(
+        train_url=str(syn_corpus / "train" / "shard-{000000..000001}.tar"),
+        val_url=str(syn_corpus / "val" / "shard-000000.tar"),
+        batch_size=1,
+        return_tokens=False,
+        num_workers=0,
+    )
+    dm.setup("fit")
+    batch = next(iter(dm.train_dataloader()))
+    assert batch.shape[1:] == (9, 512, 512)
