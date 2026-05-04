@@ -112,6 +112,44 @@ def test_train_runner_builds_ddp_trainer_when_devices_gt_1(monkeypatch, tmp_path
     assert captured.get("use_distributed_sampler") is False
 
 
+def _assert_all_log_calls_use_sync_dist(cls) -> None:
+    """AST walk: every self.log / self.log_dict call must pass sync_dist."""
+    import ast
+    import inspect
+    src = inspect.getsource(cls)
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("log", "log_dict"):
+            continue
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "self"):
+            continue
+        kwargs = {kw.arg for kw in node.keywords}
+        assert "sync_dist" in kwargs, (
+            f"missing sync_dist=True in: {ast.unparse(node)}"
+        )
+
+
+def test_stage_a_logging_uses_sync_dist():
+    """Under DDP, self.log() without sync_dist=True logs only rank 0's
+    value, silently desyncing metrics."""
+    from bonzai_genai.training.lit_stage_a import LitStageA
+    _assert_all_log_calls_use_sync_dist(LitStageA)
+
+
+def test_stage_b_logging_uses_sync_dist():
+    from bonzai_genai.training.lit_stage_b import LitStageB
+    _assert_all_log_calls_use_sync_dist(LitStageB)
+
+
+def test_vae_logging_uses_sync_dist():
+    from bonzai_genai.training.lit_vae import LitVAE
+    _assert_all_log_calls_use_sync_dist(LitVAE)
+
+
 def test_train_runner_single_gpu_trainer_when_devices_unset(monkeypatch, tmp_path):
     """If BONZAI_DDP_DEVICES is unset (or 1), Trainer is constructed
     without strategy='ddp' (single-process mode), preserving the

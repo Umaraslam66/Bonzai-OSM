@@ -48,7 +48,7 @@ class LitStageB(L.LightningModule):
             reduction="none",
         )
         loss = (loss * valid.reshape(-1).float()).sum() / valid.sum().clamp(min=1)
-        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:

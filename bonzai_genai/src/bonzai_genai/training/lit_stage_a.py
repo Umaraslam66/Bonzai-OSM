@@ -63,7 +63,7 @@ class LitStageA(L.LightningModule):
         sigma_data = self.hparams.sigma_data
         w = (sigma_b ** 2 + sigma_data ** 2) / ((sigma_b * sigma_data) ** 2)
         loss = (w * (x_hat - z0) ** 2).mean()
-        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:

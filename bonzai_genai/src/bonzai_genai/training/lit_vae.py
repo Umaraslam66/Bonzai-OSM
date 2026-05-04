@@ -30,8 +30,11 @@ class LitVAE(L.LightningModule):
             + losses["recon_mse"]
             + self.hparams.kl_weight * losses["kl"]
         )
-        self.log_dict({f"train/{k}": v for k, v in losses.items()}, prog_bar=False)
-        self.log("train/loss", total, prog_bar=True)
+        self.log_dict(
+            {f"train/{k}": v for k, v in losses.items()},
+            prog_bar=False, sync_dist=True,
+        )
+        self.log("train/loss", total, prog_bar=True, sync_dist=True)
         return total
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
@@ -42,8 +45,11 @@ class LitVAE(L.LightningModule):
             + losses["recon_mse"]
             + self.hparams.kl_weight * losses["kl"]
         )
-        self.log_dict({f"val/{k}": v for k, v in losses.items()}, prog_bar=False)
-        self.log("val/loss", total, prog_bar=True)
+        self.log_dict(
+            {f"val/{k}": v for k, v in losses.items()},
+            prog_bar=False, sync_dist=True,
+        )
+        self.log("val/loss", total, prog_bar=True, sync_dist=True)
         return total
 
     def configure_optimizers(self):
