@@ -25,3 +25,21 @@ def test_lit_vae_one_training_step(synth_raster_batch):
     loss.backward()
     opt.step()
     assert torch.isfinite(loss)
+
+
+def test_lit_stage_a_one_training_step(synth_raster_batch):
+    from bonzai_genai.models.configs import DiTConfig
+    from bonzai_genai.training.lit_stage_a import LitStageA
+    lit = LitStageA(
+        dit_config=DiTConfig.from_preset(TinyPreset),
+        vae_config=VAEConfig.from_preset(TinyPreset),
+        cfg_dropout_prob=0.1,
+        lr=1e-4,
+    )
+    opt = lit.configure_optimizers()
+    if isinstance(opt, dict):
+        opt = opt["optimizer"]
+    loss = lit.training_step(synth_raster_batch, batch_idx=0)
+    loss.backward()
+    opt.step()
+    assert torch.isfinite(loss)
