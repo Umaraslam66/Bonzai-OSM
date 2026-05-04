@@ -1,5 +1,25 @@
 # Scripts
 
+## Leonardo install — CUDA gotcha
+
+**The default `pip install -e ".[dev]"` on Leonardo pulls torch with cu130 wheels, which fail at runtime against Leonardo's CUDA 12.2 driver.** Symptom: `RuntimeError: The NVIDIA driver on your system is too old (found version 12020)`.
+
+Fix sequence after the editable install:
+
+```bash
+.venv/bin/pip uninstall -y torch triton \
+    nvidia-cublas nvidia-cuda-cupti nvidia-cuda-nvrtc nvidia-cuda-runtime \
+    nvidia-cudnn-cu13 nvidia-cufft nvidia-cufile nvidia-curand \
+    nvidia-cusolver nvidia-cusparse nvidia-cusparselt-cu13 \
+    nvidia-nccl-cu13 nvidia-nvjitlink nvidia-nvshmem-cu13 nvidia-nvtx \
+    cuda-bindings cuda-pathfinder cuda-toolkit
+.venv/bin/pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+```
+
+(Reinstall `lightning` + `torchmetrics` afterward if pip removed them.)
+
+Verify: `.venv/bin/python -c "import torch; print(torch.__version__, torch.version.cuda)"` should print `2.5.1+cu121 12.1`.
+
 ## `prepare_tiles_local.py`
 
 CLI entrypoint. Two subcommands:
