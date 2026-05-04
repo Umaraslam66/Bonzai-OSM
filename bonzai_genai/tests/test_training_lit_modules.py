@@ -43,3 +43,28 @@ def test_lit_stage_a_one_training_step(synth_raster_batch):
     loss.backward()
     opt.step()
     assert torch.isfinite(loss)
+
+
+def test_lit_stage_b_one_training_step():
+    from bonzai_genai.models.configs import (
+        InkerConfig,
+        RasterEncoderConfig,
+    )
+    from bonzai_genai.training.lit_stage_b import LitStageB
+    lit = LitStageB(
+        inker_config=InkerConfig.from_preset(TinyPreset),
+        raster_encoder_config=RasterEncoderConfig.from_preset(TinyPreset),
+        lr=3e-4,
+    )
+    opt = lit.configure_optimizers()
+    if isinstance(opt, dict):
+        opt = opt["optimizer"]
+    batch = {
+        "raster": torch.randn(1, 9, 512, 512),
+        "tokens": torch.randint(0, 1000, (1, 64)),
+        "token_lens": torch.tensor([64]),
+    }
+    loss = lit.training_step(batch, batch_idx=0)
+    loss.backward()
+    opt.step()
+    assert torch.isfinite(loss)

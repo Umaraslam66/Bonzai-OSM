@@ -14,6 +14,53 @@ import torch.nn as nn
 
 
 @torch.no_grad()
+def greedy_inker_sample(
+    inker,
+    raster_encoder,
+    raster: torch.Tensor,
+    *,
+    max_tokens: int,
+    bos_id: int,
+    eos_id: int,
+    constrained: bool = False,
+) -> torch.Tensor:
+    """Greedy decode from BOS until EOS or ``max_tokens``.
+
+    Returns ``(B, T)`` token tensor including the BOS prefix.
+    Constrained-decoding logit masking is applied when ``constrained=True``.
+    """
+    inker.eval()
+    raster_encoder.eval()
+    device = raster.device
+    bs = raster.shape[0]
+    feat = raster_encoder(raster)                 # (B, D, 32, 32)
+    feat_seq = feat.flatten(2).transpose(1, 2)    # (B, 1024, D)
+    tokens = torch.full((bs, 1), bos_id, dtype=torch.long, device=device)
+    for _ in range(max_tokens):
+        logits = inker(tokens, feat_seq)
+        next_logits = logits[:, -1]
+        if constrained:
+            from bonzai_genai.models.inker import build_constrained_mask
+            from bonzai_genai.vocab.attributes import load_default_vocab
+            attr_vocab = load_default_vocab()
+            for b in range(bs):
+                state = {
+                    "phase": "header",
+                    "layer": None,
+                    "last_token": int(tokens[b, -1]),
+                }
+                mask = build_constrained_mask(
+                    state, next_logits.shape[-1], attr_vocab,
+                ).to(device)
+                next_logits[b, ~mask] = -1e9
+        nxt = next_logits.argmax(dim=-1, keepdim=True)
+        tokens = torch.cat([tokens, nxt], dim=1)
+        if (nxt == eos_id).all():
+            break
+    return tokens
+
+
+@torch.no_grad()
 def dpmpp_sample(
     model: nn.Module,
     *,
