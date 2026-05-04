@@ -1,11 +1,13 @@
 """Generate tile bundles into WebDataset shards.
 
-Two modes:
-    synthetic        — procedural smoke data (no real OSM)
-    overture-region  — real OSM data for a bbox (Phase 0.5+; Task 14 adds the sampler)
+Three modes:
+    synthetic        — procedural smoke data (single tile count)
+    synth-corpus     — Experiment 0 mixed sparse/dense corpus, train+val split
+    overture-region  — real OSM data for a bbox
 """
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import typer
@@ -134,6 +136,50 @@ def cmd_overture_region(
             progress.update(task_id, advance=1)
     writer.close()
     console.print(f"[bold green]Kept {n_kept} tiles, skipped {n_skipped}")
+
+
+@app.command("synth-corpus")
+def cmd_synth_corpus(
+    output: Path = typer.Option(..., "-o", "--output"),  # noqa: B008
+    n_train: int = typer.Option(4500, "--n-train"),  # noqa: B008
+    n_val: int = typer.Option(500, "--n-val"),  # noqa: B008
+    shard_size: int = typer.Option(500, "--shard-size"),  # noqa: B008
+    seed_base: int = typer.Option(0, "--seed-base"),  # noqa: B008
+) -> None:
+    """Generate Experiment 0 synthetic corpus: mixed sparse/dense density."""
+    vocab = load_default_vocab()
+    tokeniser = Tokeniser(vocab)
+    train_dir = output / "train"
+    val_dir = output / "val"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    val_dir.mkdir(parents=True, exist_ok=True)
+    train_w = ShardWriter(train_dir, shard_size=shard_size)
+    val_w = ShardWriter(val_dir, shard_size=shard_size)
+    rng = random.Random(seed_base)
+
+    def _emit(writer: ShardWriter, n: int, prefix: str, base: int) -> None:
+        with Progress(console=console) as progress:
+            task_id = progress.add_task(f"[green]{prefix}", total=n)
+            for i in range(n):
+                density = "dense" if rng.random() < 0.6 else "sparse"
+                geom = generate_synthetic_tile(seed=base + i, density=density)
+                raster = rasterise(geom)
+                tokens = tokeniser.encode(geom)
+                meta = TileMetadata(
+                    tile_id=f"{prefix}-{i:06d}",
+                    sw_lat=0.0, sw_lon=0.0,
+                    country="SYN", koppen="N/A",
+                    density_bucket=density,
+                    primary_land_use="mixed",
+                )
+                writer.write(TileBundle(raster=raster, tokens=tokens, metadata=meta))
+                progress.update(task_id, advance=1)
+
+    _emit(train_w, n_train, "SYN-T", seed_base)
+    _emit(val_w, n_val, "SYN-V", seed_base + n_train)
+    train_w.close()
+    val_w.close()
+    console.print(f"[bold green]Wrote {n_train} train + {n_val} val to {output}")
 
 
 if __name__ == "__main__":
