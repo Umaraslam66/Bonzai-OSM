@@ -38,20 +38,22 @@ def channel_iou(
 
 
 def fid_lite(real: torch.Tensor, fake: torch.Tensor) -> float:
-    """Simplified FID: per-channel mean+covariance distance over flattened pixels.
+    """Simplified FID: sum of per-channel mean+stddev distances.
 
-    Not Inception-feature FID; useful as a coarse divergence indicator in Phase 0b.
-    Phase 1+ should use a proper Inception-feature FID for production runs.
+    A full covariance over flattened (C*H*W=2.36M)-dim features blows memory,
+    so we collapse to scalars per channel: ``(mu_r - mu_f)^2 + (sigma_r - sigma_f)^2``.
+    Coarse divergence indicator only — Phase 1+ should use proper Inception-feature FID.
     """
-    real_flat = real.view(real.shape[0], -1).float().numpy()
-    fake_flat = fake.view(fake.shape[0], -1).float().numpy()
-    mu_r = real_flat.mean(axis=0)
-    mu_f = fake_flat.mean(axis=0)
-    cov_r = np.cov(real_flat, rowvar=False)
-    cov_f = np.cov(fake_flat, rowvar=False)
-    diff = mu_r - mu_f
-    score = float(diff @ diff + np.trace(cov_r + cov_f))
-    return max(score, 0.0)
+    real_np = real.detach().float().cpu().numpy()
+    fake_np = fake.detach().float().cpu().numpy()
+    score = 0.0
+    for c in range(real_np.shape[1]):
+        rc = real_np[:, c].reshape(-1)
+        fc = fake_np[:, c].reshape(-1)
+        mu_diff = float(rc.mean() - fc.mean())
+        sigma_diff = float(np.sqrt(rc.var()) - np.sqrt(fc.var()))
+        score += mu_diff * mu_diff + sigma_diff * sigma_diff
+    return float(max(score, 0.0))
 
 
 def conditioning_ablation(
