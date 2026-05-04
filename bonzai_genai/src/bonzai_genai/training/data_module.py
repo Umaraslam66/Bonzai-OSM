@@ -114,14 +114,20 @@ class TileDataModule(L.LightningDataModule):
         import os
 
         import webdataset as wds
-        world_size = int(os.environ.get("WORLD_SIZE", "1"))
-        kwargs: dict = dict(shardshuffle=False, empty_check=False)
-        if world_size > 1:
-            kwargs["nodesplitter"] = wds.split_by_node
-        ds = wds.WebDataset(url, **kwargs).map(_decode_bundle)
+        # Always pass split_by_node: it slices shards across ranks when
+        # torch.distributed is initialised, no-op in single-process mode.
+        # Without this, webdataset's default single_node_only raises a
+        # ValueError under DDP because SLURM does not always set
+        # WORLD_SIZE in the env-var the way we'd check directly.
+        ds = wds.WebDataset(
+            url, shardshuffle=False, empty_check=False,
+            nodesplitter=wds.split_by_node,
+        ).map(_decode_bundle)
         if training and self.hparams.balance_by_country:
             weights = self.hparams.country_weights or {}
-            rank = int(os.environ.get("RANK", "0"))
+            # Per-rank seed so each DDP rank draws an independent stream.
+            # Falls back to rank=0 in single-process mode.
+            rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
             ds = ds.compose(
                 lambda src: country_balance_filter(src, weights, seed=42 + rank)
             )
