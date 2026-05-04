@@ -70,8 +70,9 @@ def cmd_overture_region(
     Used for Phase 0a Sweden + Singapore + Sri Lanka validation runs.
     """
     from bonzai_genai.data.sampling import (
-        extract_tile_geometry_from_osm,
+        extract_tile_from_features,
         iter_tile_centres,
+        load_pbf_features,
     )
 
     vocab = load_default_vocab()
@@ -81,13 +82,20 @@ def cmd_overture_region(
     centres = list(iter_tile_centres(sw_lat, sw_lon, ne_lat, ne_lon))[:max_tiles]
     console.print(f"Processing {len(centres)} tiles from {pbf.name}")
 
+    console.print("Scanning PBF (one-time pass)...")
+    features = load_pbf_features(pbf, country_bbox=(sw_lon, sw_lat, ne_lon, ne_lat))
+    console.print(
+        f"  loaded: {len(features.roads)} roads, {len(features.buildings)} buildings, "
+        f"{len(features.land)} land polys, {len(features.pois)} POIs"
+    )
+
     n_kept = 0
     n_skipped = 0
     with Progress(console=console) as progress:
         task_id = progress.add_task("[green]Extracting", total=len(centres))
         for i, (lat, lon) in enumerate(centres):
             try:
-                geom = extract_tile_geometry_from_osm(pbf, lat, lon)
+                geom = extract_tile_from_features(features, lat, lon)
             except Exception as e:
                 console.print(f"  [yellow]skip {i}: {e}")
                 n_skipped += 1
