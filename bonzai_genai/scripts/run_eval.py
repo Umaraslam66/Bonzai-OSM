@@ -1,4 +1,19 @@
-"""Eval driver invoked by both Experiment 0 and standalone eval jobs."""
+"""Eval driver invoked by Experiment 0, Plan 3, and standalone eval jobs.
+
+Two modes:
+  default                    - measure val-set eval metrics (Phase 0b smoke).
+  BONZAI_SAMPLE_FROM_CKPT=1  - load Painter / Writer / VAE checkpoints,
+                              generate N samples, dump PNGs + GeoJSON
+                              to BONZAI_SAMPLE_OUT.
+
+Plan 3 mode env-vars:
+    BONZAI_CKPT_DIR              dir containing vae.ckpt, stage_a.ckpt, stage_b.ckpt
+    BONZAI_SAMPLE_OUT            output dir for PNGs + GeoJSON
+    BONZAI_PRESET                "plan3" (default) | "tiny" | "production"
+    BONZAI_NUM_SAMPLES           default 64 (16 unconditional + 48 conditional)
+    BONZAI_NUM_DPM_STEPS         default 50
+    BONZAI_INKER_MAX_TOKENS      default 4096
+"""
 from __future__ import annotations
 
 import json
@@ -25,7 +40,8 @@ from bonzai_genai.vocab.attributes import load_default_vocab  # noqa: E402
 from bonzai_genai.vocab.tokeniser import Tokeniser  # noqa: E402
 
 
-def main() -> None:
+def main_val_eval() -> None:
+    """Original Phase 0b mode: metrics on the val ground-truth set + Markdown report."""
     out_dir = Path(os.environ["BONZAI_EXP0_OUT"])
     val_url = os.environ["BONZAI_VAL_URL"]
 
@@ -47,7 +63,6 @@ def main() -> None:
     vocab = load_default_vocab()
     results: dict[str, dict] = {}
 
-    # Stage A: smoke sanity (real-vs-real on the val set).
     iou = channel_iou(val_rasters[:32], val_rasters[:32])
     fid = fid_lite(val_rasters[:32], val_rasters[32:64]) if val_rasters.shape[0] >= 64 else 0.0
     results["stage_a"] = {
@@ -55,11 +70,9 @@ def main() -> None:
         "fid_lite_real_vs_real": float(fid),
     }
 
-    # Stage B: validity rate over val token sequences.
     val_rate = validity_rate(val_tokens_lists[:32], vocab=vocab)
     results["stage_b"] = {"validity_rate_val_tokens": val_rate}
 
-    # Decode + Chamfer + road graph + POI + self-intersection on first 4 val tiles.
     tok = Tokeniser(vocab)
     chamfer_vals: list[float] = []
     rg_fracs: list[float] = []
@@ -89,7 +102,7 @@ def main() -> None:
 
     (out_dir / "eval_results.json").write_text(json.dumps(results, indent=2))
 
-    # Build human-readable report
+    # Human-readable report (preserved from Phase 0b)
     report = ["# Experiment 0 Report", ""]
     report.append(f"**Output dir:** `{out_dir}`")
     report.append("")
@@ -111,10 +124,174 @@ def main() -> None:
     )
     pass_validity = results["stage_b"]["validity_rate_val_tokens"] >= 0.90
     report.append(
-        f"- Validity ≥ 90%: {'PASS' if pass_validity else 'NEEDS REVIEW'}"
+        f"- Validity >= 90%: {'PASS' if pass_validity else 'NEEDS REVIEW'}"
     )
     (out_dir / "EXPERIMENT_0_REPORT.md").write_text("\n".join(report))
     print("Wrote", out_dir / "EXPERIMENT_0_REPORT.md")
+
+
+def _render_raster_png(raster: torch.Tensor, path: Path) -> None:
+    """Render a (9, 512, 512) raster as a 3x3 grid PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    arr = raster.detach().cpu().numpy()
+    fig, axes = plt.subplots(3, 3, figsize=(7, 7))
+    for ch in range(9):
+        ax = axes[ch // 3, ch % 3]
+        ax.imshow(
+            arr[ch], cmap="viridis" if ch == 5 else "gray_r",
+            vmin=0, vmax=1,
+        )
+        ax.set_title(f"ch{ch}", fontsize=8)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.tight_layout()
+    fig.savefig(path, dpi=80, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _geom_to_geojson(geom) -> dict:
+    """Convert a TileGeometry to a GeoJSON FeatureCollection (tile-local m)."""
+    feats: list[dict] = []
+    for poly in getattr(geom, "land", []):
+        feats.append({
+            "type": "Feature",
+            "properties": {"kind": "land", "class": poly.class_name},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [list(poly.vertices)],
+            },
+        })
+    for road in getattr(geom, "roads", []):
+        feats.append({
+            "type": "Feature",
+            "properties": {"kind": "road", "class": road.class_name},
+            "geometry": {
+                "type": "LineString",
+                "coordinates": list(road.polyline),
+            },
+        })
+    for bldg in getattr(geom, "buildings", []):
+        feats.append({
+            "type": "Feature",
+            "properties": {
+                "kind": "building",
+                "class": bldg.class_name,
+                "height": bldg.height_name,
+            },
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [list(bldg.vertices)],
+            },
+        })
+    for poi in getattr(geom, "pois", []):
+        feats.append({
+            "type": "Feature",
+            "properties": {"kind": "poi", "class": poi.class_name},
+            "geometry": {"type": "Point", "coordinates": list(poi.point)},
+        })
+    return {"type": "FeatureCollection", "features": feats}
+
+
+def main_sample_from_ckpt() -> None:
+    """Plan 3 mode: load checkpoints, generate samples, dump PNGs + GeoJSON."""
+    from bonzai_genai.models.configs import (
+        DiTConfig,
+        InkerConfig,
+        RasterEncoderConfig,
+        VAEConfig,
+    )
+    from bonzai_genai.training.lit_stage_a import LitStageA
+    from bonzai_genai.training.lit_stage_b import LitStageB
+    from bonzai_genai.training.lit_vae import LitVAE
+    from bonzai_genai.training.samplers import dpmpp_sample, greedy_inker_sample
+    from bonzai_genai.vocab.tokens import SpecialToken
+
+    ckpt_dir = Path(os.environ["BONZAI_CKPT_DIR"])
+    out_dir = Path(os.environ["BONZAI_SAMPLE_OUT"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    preset = os.environ.get("BONZAI_PRESET", "plan3")
+    n_samples = int(os.environ.get("BONZAI_NUM_SAMPLES", "64"))
+    dpm_steps = int(os.environ.get("BONZAI_NUM_DPM_STEPS", "50"))
+    inker_max = int(os.environ.get("BONZAI_INKER_MAX_TOKENS", "4096"))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Loading VAE from {ckpt_dir / 'vae.ckpt'}...", flush=True)
+    vae_lit = LitVAE.load_from_checkpoint(
+        str(ckpt_dir / "vae.ckpt"),
+        vae_config=VAEConfig.from_preset(preset),
+        map_location=device,
+    )
+    vae = vae_lit.vae.eval().to(device)
+
+    print(f"Loading Painter from {ckpt_dir / 'stage_a.ckpt'}...", flush=True)
+    sa_lit = LitStageA.load_from_checkpoint(
+        str(ckpt_dir / "stage_a.ckpt"),
+        dit_config=DiTConfig.from_preset(preset),
+        vae_config=VAEConfig.from_preset(preset),
+        map_location=device,
+    )
+    dit = sa_lit.dit.eval().to(device)
+
+    print(f"Loading Writer from {ckpt_dir / 'stage_b.ckpt'}...", flush=True)
+    sb_lit = LitStageB.load_from_checkpoint(
+        str(ckpt_dir / "stage_b.ckpt"),
+        inker_config=InkerConfig.from_preset(preset),
+        raster_encoder_config=RasterEncoderConfig.from_preset(preset),
+        map_location=device,
+    )
+    inker = sb_lit.inker.eval().to(device)
+    raster_encoder = sb_lit.encoder.eval().to(device)
+
+    vocab = load_default_vocab()
+    tok = Tokeniser(vocab)
+    bos = int(SpecialToken.BOS)
+    eos = int(SpecialToken.EOS)
+
+    print(f"Sampling {n_samples} latents via {dpm_steps}-step DPM-Solver++...", flush=True)
+    latent_dim = VAEConfig.from_preset(preset).latent_dim
+    with torch.no_grad():
+        latents = dpmpp_sample(
+            dit, batch_size=n_samples, num_steps=dpm_steps,
+            latent_shape=(latent_dim, 64, 64), device=device,
+        )
+        # VAE decoder -> 9-channel rasters; sigmoid for binary channels
+        recon_logits = vae.decoder(latents)
+        rasters = torch.sigmoid(recon_logits)
+
+    print(f"Rendering {n_samples} PNGs...", flush=True)
+    for i in range(n_samples):
+        _render_raster_png(rasters[i], out_dir / f"sample_{i:03d}.png")
+
+    print(f"Decoding {n_samples} tiles through Writer (greedy)...", flush=True)
+    for i in range(n_samples):
+        with torch.no_grad():
+            tokens = greedy_inker_sample(
+                inker, raster_encoder, rasters[i:i + 1],
+                max_tokens=inker_max, bos_id=bos, eos_id=eos, constrained=False,
+            )
+        seq = tokens.squeeze(0).tolist()
+        try:
+            geom = tok.decode(list(seq))
+            geojson = _geom_to_geojson(geom)
+        except Exception as e:  # noqa: BLE001
+            geojson = {
+                "type": "FeatureCollection",
+                "features": [],
+                "decode_error": f"{type(e).__name__}: {e}",
+            }
+        (out_dir / f"sample_{i:03d}.geojson").write_text(json.dumps(geojson))
+
+    print(f"Wrote {n_samples} PNGs and {n_samples} GeoJSON files to {out_dir}", flush=True)
+
+
+def main() -> None:
+    if os.environ.get("BONZAI_SAMPLE_FROM_CKPT") == "1":
+        main_sample_from_ckpt()
+    else:
+        main_val_eval()
 
 
 if __name__ == "__main__":
