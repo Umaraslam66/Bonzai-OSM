@@ -84,3 +84,17 @@ def test_plan3_inker_context_is_8k():
 def test_plan3_raster_encoder_output_dim():
     plan3 = RasterEncoderConfig.from_preset(Plan3Preset)
     assert plan3.output_dim == 512
+
+
+def test_plan3_vae_matches_tiny_for_smoke_ckpt_reuse():
+    """Plan 3 warm-starts from the Phase 0b smoke VAE checkpoint
+    (base_channels=32). The shapes must match or load_state_dict will
+    fail with a `size mismatch` error on Leonardo. A bigger VAE is
+    deferred to Phase 3 production training.
+    """
+    tiny = VAEConfig.from_preset(TinyPreset)
+    plan3 = VAEConfig.from_preset(Plan3Preset)
+    assert plan3.base_channels == tiny.base_channels
+    assert plan3.latent_dim == tiny.latent_dim
+    assert plan3.spatial_compression == tiny.spatial_compression
+    assert plan3.num_down_blocks == tiny.num_down_blocks

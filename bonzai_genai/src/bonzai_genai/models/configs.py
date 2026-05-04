@@ -36,9 +36,10 @@ class VAEConfig:
         if name == TinyPreset:
             return cls(base_channels=32)
         if name == Plan3Preset:
-            # VAE re-used as-is from smoke; small bump to 48 base channels
-            # for Plan 3 reconstruction headroom on real tiles.
-            return cls(base_channels=48)
+            # Plan 3 VAE matches TinyPreset by design — we warm-start from
+            # the Phase 0b smoke VAE checkpoint (base_channels=32). A
+            # bigger VAE is deferred to Phase 3 production training.
+            return cls(base_channels=32)
         return cls(base_channels=64)
 
 
