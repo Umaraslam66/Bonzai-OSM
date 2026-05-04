@@ -12,6 +12,7 @@ Overture parquet reads via DuckDB.
 from __future__ import annotations
 
 import math
+import random
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -46,17 +47,29 @@ def _metres_to_lon(metres: float, at_lat: float) -> float:
 
 def iter_tile_centres(
     sw_lat: float, sw_lon: float, ne_lat: float, ne_lon: float,
+    *,
+    shuffle: bool = True,
 ) -> Iterator[tuple[float, float]]:
-    """Yield (lat, lon) for the SW corner of every tile inside the bbox."""
+    """Yield (lat, lon) for the SW corner of every tile inside the bbox.
+
+    Deterministically shuffled by default so a downstream ``max_tiles``
+    cap samples uniformly across the bbox instead of biasing to the SW
+    corner -- vital for big bboxes (e.g. Sweden) whose SW corner is
+    mostly water.
+    """
+    centres: list[tuple[float, float]] = []
     lat = sw_lat
     while lat < ne_lat:
         dlat = _metres_to_lat(TILE_SIDE_M)
         lon = sw_lon
         while lon < ne_lon:
-            yield (lat, lon)
+            centres.append((lat, lon))
             dlon = _metres_to_lon(TILE_SIDE_M, at_lat=lat)
             lon += dlon
         lat += dlat
+    if shuffle:
+        random.Random(20260504).shuffle(centres)
+    yield from centres
 
 
 # Mapping from OSM `highway` tag values to our road class names.
