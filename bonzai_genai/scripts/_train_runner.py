@@ -22,7 +22,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import lightning as L  # noqa: E402
+import lightning as L  # noqa: E402, N812
 
 from bonzai_genai.models.configs import (  # noqa: E402
     DiTConfig,
@@ -84,13 +84,27 @@ def main() -> None:
     else:
         raise SystemExit(f"unknown BONZAI_STAGE: {stage}")
 
-    trainer = L.Trainer(
+    devices = int(os.environ.get("BONZAI_DDP_DEVICES", "1"))
+    trainer_kwargs: dict = dict(
         max_epochs=max_epochs,
         default_root_dir=str(out_dir),
         log_every_n_steps=10,
         accumulate_grad_batches=int(os.environ.get("BONZAI_GRAD_ACCUM", "1")),
         precision="bf16-mixed",
     )
+    if devices > 1:
+        # Saturate the full Leonardo node — boost_usr_prod bills per node
+        # regardless of GPU count. See feedback_leonardo_full_node.md.
+        trainer_kwargs.update(
+            accelerator="gpu",
+            devices=devices,
+            strategy="ddp",
+            sync_batchnorm=True,
+            # We use streaming WebDataset with wds.split_by_node; Lightning
+            # must NOT replace our sampler with its own DistributedSampler.
+            use_distributed_sampler=False,
+        )
+    trainer = L.Trainer(**trainer_kwargs)
     trainer.fit(lit, datamodule=dm)
 
 

@@ -68,3 +68,86 @@ def test_lit_stage_b_one_training_step():
     loss.backward()
     opt.step()
     assert torch.isfinite(loss)
+
+
+def test_train_runner_builds_ddp_trainer_when_devices_gt_1(monkeypatch, tmp_path):
+    """`BONZAI_DDP_DEVICES=4` should construct a Trainer with devices=4
+    and strategy='ddp'. We patch lightning.Trainer to a sentinel that
+    captures kwargs.
+    """
+    import importlib
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setenv("BONZAI_STAGE", "vae")
+    monkeypatch.setenv("BONZAI_PRESET", "tiny")
+    monkeypatch.setenv("BONZAI_TRAIN_URL", "stub://train")
+    monkeypatch.setenv("BONZAI_VAL_URL", "stub://val")
+    monkeypatch.setenv("BONZAI_OUT", str(tmp_path))
+    monkeypatch.setenv("BONZAI_BATCH_SIZE", "1")
+    monkeypatch.setenv("BONZAI_MAX_EPOCHS", "0")
+    monkeypatch.setenv("BONZAI_DDP_DEVICES", "4")
+
+    captured: dict = {}
+
+    class _StubTrainer:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def fit(self, *a, **kw):
+            return None
+
+    import lightning as L  # noqa: N812
+    monkeypatch.setattr(L, "Trainer", _StubTrainer)
+
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "scripts"))
+    if "_train_runner" in sys.modules:
+        del sys.modules["_train_runner"]
+    runner = importlib.import_module("_train_runner")
+    runner.main()
+
+    assert captured.get("devices") == 4
+    assert captured.get("strategy") == "ddp"
+    assert captured.get("use_distributed_sampler") is False
+
+
+def test_train_runner_single_gpu_trainer_when_devices_unset(monkeypatch, tmp_path):
+    """If BONZAI_DDP_DEVICES is unset (or 1), Trainer is constructed
+    without strategy='ddp' (single-process mode), preserving the
+    Phase 0b smoke behaviour.
+    """
+    import importlib
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setenv("BONZAI_STAGE", "vae")
+    monkeypatch.setenv("BONZAI_PRESET", "tiny")
+    monkeypatch.setenv("BONZAI_TRAIN_URL", "stub://train")
+    monkeypatch.setenv("BONZAI_VAL_URL", "stub://val")
+    monkeypatch.setenv("BONZAI_OUT", str(tmp_path))
+    monkeypatch.setenv("BONZAI_BATCH_SIZE", "1")
+    monkeypatch.setenv("BONZAI_MAX_EPOCHS", "0")
+    monkeypatch.delenv("BONZAI_DDP_DEVICES", raising=False)
+
+    captured: dict = {}
+
+    class _StubTrainer:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def fit(self, *a, **kw):
+            return None
+
+    import lightning as L  # noqa: N812
+    monkeypatch.setattr(L, "Trainer", _StubTrainer)
+
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "scripts"))
+    if "_train_runner" in sys.modules:
+        del sys.modules["_train_runner"]
+    runner = importlib.import_module("_train_runner")
+    runner.main()
+
+    # Single-GPU path: strategy not set or default
+    assert captured.get("strategy") != "ddp"
