@@ -6,16 +6,55 @@ Two modes:
 
 Token sequences are right-padded to ``max_token_len``; ``token_lens``
 records the real length before padding.
+
+Country balance: when ``balance_by_country=True``, a streaming rejection
+filter (``country_balance_filter``) keeps each tile with probability
+proportional to its country weight. With weights ``= 1/count_per_country``,
+the filtered stream's per-country distribution is uniform.
 """
 from __future__ import annotations
 
 import io
 import json
+import random as _random
+from collections.abc import Iterable, Iterator
 
 import lightning as L  # noqa: N812
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
+
+def country_balance_filter(
+    stream: Iterable[dict],
+    country_weights: dict[str, float],
+    *,
+    seed: int = 0,
+) -> Iterator[dict]:
+    """Streaming country-balanced rejection sampler.
+
+    Each item is kept with probability
+    ``country_weights[item["country"]] / max_weight``. Items from the
+    rarest country are kept ~always; items from the most common country
+    are kept proportionally less often. The output stream's per-country
+    distribution converges to uniform.
+
+    Stateless across ranks — pass a different ``seed`` per rank to get
+    independent sample streams under DDP.
+    """
+    if not country_weights:
+        yield from stream
+        return
+    max_w = max(country_weights.values())
+    rng = _random.Random(seed)
+    for item in stream:
+        c = item.get("country", "unknown")
+        w = country_weights.get(c, 0.0)
+        if w <= 0:
+            continue
+        keep_p = w / max_w
+        if rng.random() < keep_p:
+            yield item
 
 
 def _decode_bundle(sample: dict) -> dict:

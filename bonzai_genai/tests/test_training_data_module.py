@@ -108,3 +108,62 @@ def test_data_module_decoded_sample_falls_back_to_unknown_country():
     }
     decoded = _decode_bundle(fake_sample)
     assert decoded["country"] == "unknown"
+
+
+def test_country_balance_filter_balances_imbalanced_stream():
+    """Given a stream with country counts {SE:30, SR:10, SG:5}, the
+    rejection filter should yield roughly equal counts per country
+    (within tolerance) over enough samples.
+    """
+    import random
+
+    from bonzai_genai.training.data_module import country_balance_filter
+
+    def _stream():
+        items = (["SE"] * 30) + (["SR"] * 10) + (["SG"] * 5)
+        random.Random(42).shuffle(items)
+        # Cycle the stream so we can pull many samples.
+        for _ in range(200):
+            for c in items:
+                yield {"country": c, "payload": c}
+
+    weights = {"SE": 1 / 30, "SR": 1 / 10, "SG": 1 / 5}
+    seen = {"SE": 0, "SR": 0, "SG": 0}
+    for i, item in enumerate(country_balance_filter(_stream(), weights, seed=0)):
+        seen[item["country"]] += 1
+        if i >= 3000:
+            break
+    mean = sum(seen.values()) / 3
+    for c, n in seen.items():
+        assert abs(n - mean) / mean < 0.25, f"{c}: {n} vs mean {mean}"
+
+
+def test_country_balance_filter_passes_through_when_weights_empty():
+    """No weights -> no filtering."""
+    from bonzai_genai.training.data_module import country_balance_filter
+    src = [{"country": "X", "id": i} for i in range(50)]
+    out = list(country_balance_filter(iter(src), {}))
+    assert len(out) == 50
+
+
+def test_country_balance_filter_rank_seeds_produce_independent_streams():
+    """Different seeds (different ranks) must produce independent samples."""
+    import random
+
+    from bonzai_genai.training.data_module import country_balance_filter
+
+    def _stream(n):
+        rng = random.Random(7)
+        items = (["SE"] * 30) + (["SR"] * 10) + (["SG"] * 5)
+        for _ in range(n):
+            for c in items:
+                yield {"country": c, "id": rng.random()}
+
+    weights = {"SE": 1 / 30, "SR": 1 / 10, "SG": 1 / 5}
+    s0 = [it["id"] for it in country_balance_filter(_stream(50), weights, seed=0)][:200]
+    s1 = [it["id"] for it in country_balance_filter(_stream(50), weights, seed=1)][:200]
+    # The two streams should overlap heavily in id values (same source) but
+    # differ in keep/reject decisions, so the kept ID sequences should
+    # differ in at least 5 of the first 50 positions.
+    diffs = sum(1 for a, b in zip(s0[:50], s1[:50], strict=False) if a != b)
+    assert diffs > 5, f"only {diffs} differences — sampler not rank-aware"
