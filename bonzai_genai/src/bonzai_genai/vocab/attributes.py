@@ -12,9 +12,9 @@ from pathlib import Path
 import yaml
 
 from bonzai_genai.config import COORD_BINS
-from bonzai_genai.vocab.tokens import NUM_SPECIAL_TOKENS
+from bonzai_genai.vocab.tokens import NUM_NODE_REF_TOKENS, NUM_SPECIAL_TOKENS
 
-ATTR_BASE_ID: int = NUM_SPECIAL_TOKENS + 2 * COORD_BINS
+ATTR_BASE_ID: int = NUM_SPECIAL_TOKENS + 2 * COORD_BINS + NUM_NODE_REF_TOKENS
 
 
 class AttributeVocab:

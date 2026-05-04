@@ -60,3 +60,28 @@ def test_coord_token_id_rejects_out_of_range():
         coord_x_token_id(COORD_BINS)
     with pytest.raises(ValueError):
         coord_y_token_id(COORD_BINS)
+
+
+def test_node_ref_token_count():
+    from bonzai_genai.vocab.tokens import NUM_NODE_REF_TOKENS
+    assert NUM_NODE_REF_TOKENS == 8192
+
+
+def test_node_ref_tokens_disjoint_from_coords():
+    from bonzai_genai.vocab.tokens import node_ref_token_id
+    # Node-refs come after both coord ranges.
+    assert node_ref_token_id(0) >= NUM_SPECIAL_TOKENS + 2 * COORD_BINS
+
+
+def test_node_ref_token_id_invertible():
+    from bonzai_genai.vocab.tokens import node_ref_token_id, parse_node_ref_token
+    for i in (0, 1, 100, 4095, 8191):
+        assert parse_node_ref_token(node_ref_token_id(i)) == i
+
+
+def test_node_ref_token_id_rejects_out_of_range():
+    from bonzai_genai.vocab.tokens import NUM_NODE_REF_TOKENS, node_ref_token_id
+    with pytest.raises(ValueError):
+        node_ref_token_id(-1)
+    with pytest.raises(ValueError):
+        node_ref_token_id(NUM_NODE_REF_TOKENS)

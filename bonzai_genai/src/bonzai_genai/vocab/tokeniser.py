@@ -14,8 +14,10 @@ from bonzai_genai.vocab.tokens import (
     SpecialToken,
     coord_x_token_id,
     coord_y_token_id,
+    node_ref_token_id,
     parse_coord_x_token,
     parse_coord_y_token,
+    parse_node_ref_token,
 )
 
 
@@ -115,14 +117,7 @@ class Tokeniser:
             out.append(int(SpecialToken.ROAD_EDGE))
             out.append(self._vocab.id(class_name))
             for n in nodes:
-                # Encode node refs by re-using x-coord token space. The decoder
-                # treats the x-coord token integer namespace uniformly. Plan 4
-                # will swap in dedicated node-ref tokens once Stage B starts.
-                if n >= COORD_BINS:
-                    raise ValueError(
-                        f"too many road nodes in tile ({n + 1} > {COORD_BINS})"
-                    )
-                out.append(coord_x_token_id(n))
+                out.append(node_ref_token_id(n))
             out.append(int(SpecialToken.ROAD_EDGE_END))
 
         # Buildings layer
@@ -194,7 +189,7 @@ class Tokeniser:
             i += 1
             ref_indices: list[int] = []
             while _peek() != int(SpecialToken.ROAD_EDGE_END):
-                ref_indices.append(parse_coord_x_token(tokens[i]))
+                ref_indices.append(parse_node_ref_token(tokens[i]))
                 i += 1
             i += 1  # ROAD_EDGE_END
             polyline = [nodes_m[k] for k in ref_indices]

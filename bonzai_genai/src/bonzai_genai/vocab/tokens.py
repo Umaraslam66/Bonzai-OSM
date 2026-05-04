@@ -2,10 +2,11 @@
 
 Vocabulary layout:
 
-    [0 .. NUM_SPECIAL_TOKENS)                  : structural / control tokens
-    [NUM_SPECIAL_TOKENS .. + COORD_BINS)       : x-coord tokens
-    [+ COORD_BINS .. + 2 * COORD_BINS)         : y-coord tokens
-    [+ 2 * COORD_BINS .. + 2 * COORD_BINS + NUM_ATTR_TOKENS) : attribute tokens
+    [0 .. NUM_SPECIAL_TOKENS)                                          : structural / control tokens
+    [NUM_SPECIAL_TOKENS .. + COORD_BINS)                               : x-coord tokens
+    [+ COORD_BINS .. + 2 * COORD_BINS)                                 : y-coord tokens
+    [+ 2 * COORD_BINS .. + 2 * COORD_BINS + NUM_NODE_REF_TOKENS)       : node-ref tokens
+    [+ 2 * COORD_BINS + NUM_NODE_REF_TOKENS .. + NUM_ATTR_TOKENS)      : attribute tokens
 
 Attribute tokens are loaded separately (see attributes.py).
 """
@@ -65,3 +66,22 @@ def parse_coord_y_token(token_id: int) -> int:
     if not base <= token_id < base + COORD_BINS:
         raise ValueError(f"token_id {token_id} not in y-coord range")
     return token_id - base
+
+
+NUM_NODE_REF_TOKENS: int = 8192
+_NODE_REF_BASE: int = NUM_SPECIAL_TOKENS + 2 * COORD_BINS
+
+
+def node_ref_token_id(node_index: int) -> int:
+    if not 0 <= node_index < NUM_NODE_REF_TOKENS:
+        raise ValueError(
+            f"node_index {node_index} out of range [0, {NUM_NODE_REF_TOKENS})"
+        )
+    return _NODE_REF_BASE + node_index
+
+
+def parse_node_ref_token(token_id: int) -> int:
+    """Inverse of node_ref_token_id; returns the node index."""
+    if not _NODE_REF_BASE <= token_id < _NODE_REF_BASE + NUM_NODE_REF_TOKENS:
+        raise ValueError(f"token_id {token_id} not in node-ref range")
+    return token_id - _NODE_REF_BASE

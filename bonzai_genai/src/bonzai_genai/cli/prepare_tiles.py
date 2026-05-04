@@ -107,8 +107,9 @@ def cmd_overture_region(
                 progress.update(task_id, advance=1)
                 continue
             except ValueError as e:
-                # e.g. >COORD_BINS road nodes in a dense urban tile.
-                # Plan 4 (Stage B) introduces dedicated node-ref tokens to lift this cap.
+                # Tile has >NUM_NODE_REF_TOKENS (8192) unique road nodes.
+                # Genuinely extreme density (e.g. central Marina Bay multi-level
+                # interchanges); expected to be rare outside that band.
                 console.print(f"  [yellow]encode overflow tile {i}: {e}")
                 n_skipped += 1
                 progress.update(task_id, advance=1)

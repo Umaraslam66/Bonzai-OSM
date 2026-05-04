@@ -144,3 +144,18 @@ def test_roundtrip_empty_tile(tokeniser):
     assert decoded.roads == []
     assert decoded.buildings == []
     assert decoded.pois == []
+
+
+def test_can_encode_more_than_512_unique_nodes(tokeniser):
+    """Phase 0a Task 18.5: dense tiles with >512 nodes must encode without error."""
+    # 300 distinct vertical road segments → 600 unique nodes.
+    polylines: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for i in range(300):
+        x = float((i * 6) % 2000)   # keep inside the 2048 m tile
+        polylines.append(((x, 0.0), (x, 100.0)))
+    geom = TileGeometry(
+        roads=[Road("road_class=residential", [a, b]) for a, b in polylines]
+    )
+    tokens = tokeniser.encode(geom)
+    decoded = tokeniser.decode(tokens)
+    assert len(decoded.roads) == 300
