@@ -150,6 +150,54 @@ def test_vae_logging_uses_sync_dist():
     _assert_all_log_calls_use_sync_dist(LitVAE)
 
 
+def test_train_runner_passes_country_weights_to_data_module(monkeypatch, tmp_path):
+    """`BONZAI_COUNTRY_WEIGHTS_JSON='{"sweden":0.001,"singapore":0.005}'`
+    should be parsed and forwarded to TileDataModule(balance_by_country=True,
+    country_weights=...). We capture the constructed datamodule via a
+    stub `Trainer.fit()` and inspect its hparams.
+    """
+    import importlib
+    import json
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setenv("BONZAI_STAGE", "stage_a")
+    monkeypatch.setenv("BONZAI_PRESET", "tiny")
+    monkeypatch.setenv("BONZAI_TRAIN_URL", "stub://train")
+    monkeypatch.setenv("BONZAI_VAL_URL", "stub://val")
+    monkeypatch.setenv("BONZAI_OUT", str(tmp_path))
+    monkeypatch.setenv("BONZAI_BATCH_SIZE", "1")
+    monkeypatch.setenv("BONZAI_MAX_EPOCHS", "0")
+    monkeypatch.setenv(
+        "BONZAI_COUNTRY_WEIGHTS_JSON",
+        json.dumps({"sweden": 0.001, "singapore": 0.005}),
+    )
+
+    captured: dict = {}
+
+    class _StubTrainer:
+        def __init__(self, **kw):
+            pass
+
+        def fit(self, lit, datamodule=None):
+            captured["dm"] = datamodule
+
+    import lightning as L  # noqa: N812
+    monkeypatch.setattr(L, "Trainer", _StubTrainer)
+
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "scripts"))
+    if "_train_runner" in sys.modules:
+        del sys.modules["_train_runner"]
+    runner = importlib.import_module("_train_runner")
+    runner.main()
+
+    dm = captured.get("dm")
+    assert dm is not None, "Trainer.fit was not called with a datamodule"
+    assert dm.hparams.balance_by_country is True
+    assert dm.hparams.country_weights == {"sweden": 0.001, "singapore": 0.005}
+
+
 def test_train_runner_single_gpu_trainer_when_devices_unset(monkeypatch, tmp_path):
     """If BONZAI_DDP_DEVICES is unset (or 1), Trainer is constructed
     without strategy='ddp' (single-process mode), preserving the

@@ -1,18 +1,23 @@
 """Shared Lightning trainer driver for VAE / Stage A / Stage B training.
 
 Driven entirely by env-vars set in the sbatch script:
-  BONZAI_STAGE         "vae" | "stage_a" | "stage_b"
-  BONZAI_PRESET        "tiny" | "production"
-  BONZAI_TRAIN_URL     WebDataset shard glob for training
-  BONZAI_VAL_URL       WebDataset shard glob for validation
-  BONZAI_OUT           directory for checkpoints + logs
-  BONZAI_BATCH_SIZE    integer
-  BONZAI_MAX_EPOCHS    integer (smoke = 1; production = 50-100)
-  BONZAI_VAE_CKPT      (stage_a only) frozen VAE checkpoint path
-  BONZAI_GRAD_ACCUM    (optional) gradient accumulation steps
+  BONZAI_STAGE                 "vae" | "stage_a" | "stage_b"
+  BONZAI_PRESET                "tiny" | "plan3" | "production"
+  BONZAI_TRAIN_URL             WebDataset shard glob for training
+  BONZAI_VAL_URL               WebDataset shard glob for validation
+  BONZAI_OUT                   directory for checkpoints + logs
+  BONZAI_BATCH_SIZE            integer
+  BONZAI_MAX_EPOCHS            integer (smoke = 1; production = 50-100)
+  BONZAI_VAE_CKPT              (stage_a only) frozen VAE checkpoint path
+  BONZAI_GRAD_ACCUM            (optional) gradient accumulation steps
+  BONZAI_DDP_DEVICES           (optional) >1 enables DDP across that many GPUs
+  BONZAI_COUNTRY_WEIGHTS_JSON  (optional) JSON dict country -> sampling weight
+                               When set, train DataLoader uses
+                               country_balance_filter for per-country balance.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -44,12 +49,20 @@ def main() -> None:
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    weights_json = os.environ.get("BONZAI_COUNTRY_WEIGHTS_JSON")
+    country_weights: dict[str, float] | None = (
+        json.loads(weights_json) if weights_json else None
+    )
+    balance_by_country = country_weights is not None
+
     if stage == "vae":
         from bonzai_genai.training.lit_vae import LitVAE
         lit = LitVAE(vae_config=VAEConfig.from_preset(preset))
         dm = TileDataModule(
             train_url=train_url, val_url=val_url, batch_size=batch_size,
             return_tokens=False, num_workers=4,
+            balance_by_country=balance_by_country,
+            country_weights=country_weights,
         )
     elif stage == "stage_a":
         from bonzai_genai.training.lit_stage_a import LitStageA
@@ -69,6 +82,8 @@ def main() -> None:
         dm = TileDataModule(
             train_url=train_url, val_url=val_url, batch_size=batch_size,
             return_tokens=False, num_workers=4,
+            balance_by_country=balance_by_country,
+            country_weights=country_weights,
         )
     elif stage == "stage_b":
         from bonzai_genai.training.lit_stage_b import LitStageB
@@ -80,6 +95,8 @@ def main() -> None:
             train_url=train_url, val_url=val_url, batch_size=batch_size,
             return_tokens=True, num_workers=4,
             max_token_len=InkerConfig.from_preset(preset).max_context_len,
+            balance_by_country=balance_by_country,
+            country_weights=country_weights,
         )
     else:
         raise SystemExit(f"unknown BONZAI_STAGE: {stage}")
