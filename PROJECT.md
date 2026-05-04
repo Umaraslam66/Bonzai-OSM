@@ -85,9 +85,9 @@ Three countries chosen for climatic and morphological contrast:
 
 | # | Action | Owner | Status |
 |---|---|---|---|
-| A1 | Phase 0a: build `bonzai_genai` data prep package | Claude + Umar | **in progress** |
-| A2 | Generate Sweden / Singapore / Sri Lanka tile datasets on `$WORK` | Claude + Umar | pending |
-| A3 | Write Plan 2 (synthetic smoke harness + Stage A code) | Claude | pending |
+| A1 | Phase 0a: build `bonzai_genai` data prep package | Claude + Umar | **done** (2026-05-04) |
+| A2 | Generate Sweden / Singapore / Sri Lanka tile datasets on `$WORK` | Claude + Umar | **done** (1,888 tiles / 17.3 GB; see `bonzai_genai/results/PHASE_0A_COMPLETE.md`) |
+| A3 | Write Plan 2 (synthetic smoke harness + Stage A code) | Claude | **next** |
 | A4 | Write Plan 3 (Stage B code) | Claude | pending |
 | A5 | Run Experiments 0–4 (de-risking) | Claude + Umar | pending |
 | A6 | Email superc@cineca.it for compute extension after Phase 1 green | Umar | later |
@@ -104,6 +104,7 @@ Three countries chosen for climatic and morphological contrast:
 - **2026-05-03** — Plan 1 (Phase 0a data prep) written: 20-task TDD plan; committed.
 - **2026-05-03** — branched off `overture-map` to long-lived `genai-city-model`. Removed obsolete test files (Luxembourg test SLURM jobs, early exploration scripts, prior overture-map work). Started executing Plan 1.
 - **2026-05-03** — de-risking country triple updated: Sweden + Singapore + Sri Lanka (replacing Luxembourg + Iceland) for greater geographic and climatic diversity.
+- **2026-05-04** — Phase 0a **complete**: 1,888 tile shards live on Leonardo (`$WORK/bonzai-tiles/{singapore,sri_lanka,sweden}/`, 17.3 GB total) with 0 GPU-h consumed. Bonus task 18.5 lifted the road-node cap to 8,192; bonus task 18.6 swapped `osmium-tool` subprocess for pure pyosmium with a bucketed spatial index (Leonardo doesn't ship `osmium-tool`). Sampler shuffle fix (`8e0b753`) made `iter_tile_centres` deterministically shuffle so `max_tiles` samples uniformly across big bboxes. Hand-off: `bonzai_genai/results/PHASE_0A_COMPLETE.md`.
 
 ## 9. Where everything lives
 
