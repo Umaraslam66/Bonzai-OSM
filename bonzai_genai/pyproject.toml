@@ -16,6 +16,11 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "osmium>=4.3",
+    "torch>=2.5",
+    "lightning>=2.4",
+    "einops>=0.8",
+    "torchmetrics>=1.4",
+    "networkx>=3.3",
 ]
 
 [project.optional-dependencies]
