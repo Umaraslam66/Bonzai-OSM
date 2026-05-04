@@ -1,0 +1,9 @@
+{
+  "num_shards": 3,
+  "num_records": 203,
+  "records_per_shard": [
+    100,
+    100,
+    3
+  ]
+}
