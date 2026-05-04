@@ -59,3 +59,31 @@ def test_inker_causal_mask_blocks_future_tokens(inker_cfg, raster_cfg):
         out_perturbed = inker(tokens_perturbed, raster_feat)
     # First 8 positions identical because causal mask blocks future
     assert torch.allclose(out_full[:, :8], out_perturbed[:, :8], atol=1e-5)
+
+
+def test_constrained_mask_after_x_only_y_allowed():
+    from bonzai_genai.models.inker import build_constrained_mask
+    from bonzai_genai.vocab.attributes import load_default_vocab
+    from bonzai_genai.vocab.tokens import (
+        coord_x_token_id,
+        coord_y_token_id,
+    )
+    vocab = load_default_vocab()
+    state = {"phase": "in_building_polygon", "last_token": coord_x_token_id(5)}
+    mask = build_constrained_mask(state, vocab_size=20000, attr_vocab=vocab)
+    y0 = coord_y_token_id(0)
+    y_end = coord_y_token_id(511)
+    assert mask[y0:y_end + 1].all()
+    assert not mask[coord_x_token_id(0)]
+
+
+def test_constrained_mask_layer_order_is_enforced():
+    from bonzai_genai.models.inker import build_constrained_mask
+    from bonzai_genai.vocab.attributes import load_default_vocab
+    from bonzai_genai.vocab.tokens import SpecialToken
+    vocab = load_default_vocab()
+    # If we're after LAYER_BUILDINGS, LAYER_LAND should be blocked.
+    state = {"phase": "between_buildings", "layer": "buildings"}
+    mask = build_constrained_mask(state, vocab_size=20000, attr_vocab=vocab)
+    assert not mask[int(SpecialToken.LAYER_LAND)]
+    assert not mask[int(SpecialToken.LAYER_ROADS)]

@@ -155,3 +155,62 @@ class Inker(nn.Module):
             x = block(x, raster_feat, self.rope_cos, self.rope_sin)
         x = self.norm(x)
         return self.head(x)
+
+
+# ---------------------------------------------------------------------------
+# Constrained decoding (Plan 2 Task 16). Mandatory subset only:
+#   - x -> y coordinate pair completion
+#   - Layer-order enforcement (LAND < ROADS < BUILDINGS < POIS)
+# Deferred to Plan 3+:
+#   - Polygon non-self-intersection
+#   - Road-edge node-ref bounds
+#   - Building-field ordering (class -> height -> coords)
+# ---------------------------------------------------------------------------
+
+from bonzai_genai.config import COORD_BINS  # noqa: E402
+from bonzai_genai.vocab.attributes import AttributeVocab  # noqa: E402
+from bonzai_genai.vocab.tokens import (  # noqa: E402
+    NUM_SPECIAL_TOKENS,
+    SpecialToken,
+)
+
+
+def build_constrained_mask(
+    state: dict, vocab_size: int, attr_vocab: AttributeVocab,
+) -> torch.Tensor:
+    """Return a boolean mask of length ``vocab_size``; True = allowed.
+
+    ``state`` keys:
+        - ``last_token``: int — last emitted token id (drives x->y enforcement)
+        - ``layer``: str — one of "land" / "roads" / "buildings" / "pois"
+        - ``phase``: str — coarse decoder phase tag (informational)
+    """
+    mask = torch.zeros(vocab_size, dtype=torch.bool)
+    last = state.get("last_token")
+    x_lo = NUM_SPECIAL_TOKENS
+    x_hi = x_lo + COORD_BINS
+    y_lo = x_hi
+    y_hi = y_lo + COORD_BINS
+    if last is not None and x_lo <= last < x_hi:
+        # After an x-coord, only y-coords are valid.
+        mask[y_lo:y_hi] = True
+        return mask
+    layer = state.get("layer")
+    blocked: set[int] = set()
+    if layer is not None:
+        idx_to_blocked = {
+            "land": (),
+            "roads": (SpecialToken.LAYER_LAND,),
+            "buildings": (SpecialToken.LAYER_LAND, SpecialToken.LAYER_ROADS),
+            "pois": (
+                SpecialToken.LAYER_LAND,
+                SpecialToken.LAYER_ROADS,
+                SpecialToken.LAYER_BUILDINGS,
+            ),
+        }
+        for tok in idx_to_blocked.get(layer, ()):
+            blocked.add(int(tok))
+    mask[:] = True
+    for b in blocked:
+        mask[b] = False
+    return mask
