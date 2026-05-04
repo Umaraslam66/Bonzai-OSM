@@ -1,8 +1,8 @@
 # Bonzai-OSM — Live Status
 
-> **Last updated:** 2026-05-04 (Phase 0a complete — all 20 plan tasks landed + 2 bonus tasks 18.5 / 18.6; tile shards live on Leonardo).
+> **Last updated:** 2026-05-04 (Phase 0b complete — Plan 2 done, Experiment 0 ran green on Leonardo; Plan 3 is next).
 >
-> If you are a new agent starting a session: read this file first, then [`PROJECT.md`](../../PROJECT.md), then the [spec](specs/2026-05-03-genai-city-infrastructure-design.md), then [`bonzai_genai/results/PHASE_0A_COMPLETE.md`](../../bonzai_genai/results/PHASE_0A_COMPLETE.md) for the Phase 0a hand-off, then the [completed plan](plans/2026-05-03-phase-0a-data-prep-pipeline.md). Phase 0b begins with Plan 2 (synthetic smoke harness for Experiment 0).
+> If you are a new agent starting a session: read this file first, then [`PROJECT.md`](../../PROJECT.md), then the [global design spec](specs/2026-05-03-genai-city-infrastructure-design.md), then the most recent hand-off doc — [`bonzai_genai/results/EXPERIMENT_0_REPORT.md`](../../bonzai_genai/results/EXPERIMENT_0_REPORT.md). Plan 3 (Stage A on real data + Stage B on perfect input + Experiments 1-2) is the next thing to draft.
 
 ---
 
@@ -11,18 +11,46 @@
 | | |
 |---|---|
 | Branch | `genai-city-model` (long-lived dev branch — **never merge to main**) |
-| Active phase | **Phase 0b — Synthetic smoke harness + Stage A code (next; Plan 2 to be written)** |
-| Last completed plan task | **Plan Task 20 — Phase 0a complete** (commit `d4f1ff3`) |
-| Next action | **Write Plan 2** — synthetic smoke harness for Experiment 0; 1-tile overfit on Stage A DiT before any real data |
-| Tests passing | **55 / 55** |
+| Active phase | **Phase 1 — De-risking experiments 1–4 (Plan 3 to be drafted)** |
+| Last completed plan task | **Plan 2 Task 25 — Experiment 0 ran green on Leonardo** (commit `ada9096` for the eval bug-fix; `834bf2b` for the cu121 install note) |
+| Next action | **Draft Plan 3** — Experiments 1 (Sketcher on real data) + 2 (Inker on perfect input). Re-use the existing tiny model code; bump to ~200 M params; train on Sweden + Singapore + Sri Lanka shards. |
+| Tests passing | **102 / 102** (101 + 1 skipped on Leonardo where the SG PBF isn't downloaded) |
 | Ruff lint | **Clean** |
-| GPU-h burned this session | 0 |
-| GPU-h burned cumulative on project | 14 (from prior sessions, pre-v1) |
-| Tile shards on Leonardo | `$WORK/bonzai-tiles/{singapore,sri_lanka,sweden}/` — 1,888 tiles / ~17.3 GB |
+| GPU-h burned this session | ~1 (Experiment 0 smoke run; well under the 12-30 GPU-h budget) |
+| GPU-h burned cumulative on project | ~15 (14 pre-v1 + 1 this session) |
+| Tile shards on Leonardo | `$WORK/bonzai-tiles/{singapore,sri_lanka,sweden,synth}/` — 1,888 real tiles + 5,000 synth, ~62 GB total |
+| Trained checkpoints | `$WORK/bonzai-exp0/{vae,stage_a,stage_b}/` (tiny smoke models; usable as warm starts in Plan 3) |
 
 ## Recent commit history (most recent first)
 
 ```
+ada9096 fix(eval): make fid_lite memory-safe (per-channel mean+std, not full covariance)
+834bf2b docs(scripts): record Leonardo cu130 -> cu121 torch install workaround
+abb48fa chore(lint): silence N812 (standard PyTorch/Lightning import idioms); auto-fixes from ruff
+d868129 feat(slurm): Experiment 0 driver + eval driver scripts
+1612076 feat(slurm): GPU training sbatch templates + shared Lightning trainer driver
+c9541f9 feat(eval): end-to-end channel IoU + §8.2 baselines
+d650f21 feat(eval): Stage B metrics (Chamfer, road graph, validity, POI placement)
+38216e2 feat(eval): Stage A metrics (channel IoU, FID-lite, conditioning ablation stub)
+6346ccb feat(training): Lightning Stage B + greedy Inker sampler with constrained-decoding hook
+fbf2f0b feat(models): constrained decoding logit masks (mandatory subset)
+cbf1267 feat(models): Inker token embed + RoPE + full transformer (self+cross attn)
+c1959c1 feat(models): strided CNN raster encoder for Stage B cross-attention
+6d1d3bd feat(training): EDM noise + DPM-Solver++ sampler + Lightning Stage A
+10a642f feat(models): full DiT forward with conditioning paths + unpatchify
+e1104e4 feat(models): DiT block with AdaLN-Zero conditioning
+ad50404 feat(models): DiT patch embed + sinusoidal time embed
+832992a feat(training): WebDataset LightningDataModule for raster + tokens
+0f9d2b2 feat(cli): add synth-corpus subcommand for Experiment 0 dataset prep
+c394523 feat(synth): extend procedural generator with density modes + diagonal roads
+9710dab feat(training): Lightning VAE training module
+f9b37f2 feat(models): VAE decoder + reparam + channel-aware loss
+a26bd25 feat(models): VAE encoder (9-channel raster -> 64x64x4 latent)
+1521969 feat(models): add config dataclasses with tiny/production presets
+037c4f7 feat(deps): add torch + lightning + einops + torchmetrics + networkx; scaffold models/training/eval
+d4664bd plan: phase 0b modeling layer + eval harness + experiment 0
+73ad640 spec: phase 0b modeling layer + eval harness + experiment 0
+78c71c6 docs: mark Phase 0a complete in STATUS.md + PROJECT.md
 d4f1ff3 docs(phase-0a): record Sweden + Singapore + Sri Lanka tile manifests; mark Phase 0a complete
 8e0b753 fix(data): shuffle iter_tile_centres so max_tiles samples uniformly across bbox
 e103447 feat(data): refactor sampling.py to pure pyosmium with bucketed spatial index
@@ -49,6 +77,22 @@ c83fed3 chore(genai-city-model): branch off, clean obsolete files...
 cef2396 Add Phase 0a implementation plan for data prep pipeline
 5d37e84 Add generative city model design spec and brainstorm log
 ```
+
+## Plan progress (Phase 0b — 26 tasks, all complete)
+
+- [x] T1: Add deps + scaffold model/training/eval dirs
+- [x] T2: Model configs (TinyConfig + ProductionConfig)
+- [x] T3-5: VAE encoder/decoder + LightningModule
+- [x] T6-7: Extended synth procedural + synth-corpus CLI
+- [x] T8: WebDataset LightningDataModule
+- [x] T9-12: DiT (patch embed + AdaLN-Zero block + full module + EDM/DPM-Solver++ + LightningStageA)
+- [x] T13: Strided CNN raster encoder
+- [x] T14-17: Inker (token embed + RoPE + transformer + constrained decode + LightningStageB + greedy sampler)
+- [x] T18-21: Eval harness (Stage A + Stage B + end-to-end + baselines)
+- [x] T22-23: Slurm GPU scripts + Experiment 0 driver
+- [x] T24: Local CPU dry-run (102/102 tests pass; ruff clean)
+- [x] T25: Run Experiment 0 on Leonardo — go signal MET
+- [x] T26: Wrap Phase 0b — `EXPERIMENT_0_REPORT.md` + STATUS / PROJECT updates committed
 
 ## Plan progress (Phase 0a — 20 + 2 bonus tasks; all complete)
 

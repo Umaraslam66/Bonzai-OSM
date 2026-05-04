@@ -1,0 +1,23 @@
+{
+  "stage_a": {
+    "channel_iou_self": {
+      "0": 1.0,
+      "1": 1.0,
+      "2": 1.0,
+      "3": 1.0,
+      "4": 1.0,
+      "6": 1.0,
+      "7": 1.0,
+      "8": 1.0,
+      "5": 0.0
+    },
+    "fid_lite_real_vs_real": 0.019704184437236212
+  },
+  "stage_b": {
+    "validity_rate_val_tokens": 1.0,
+    "building_chamfer_self": 0.0,
+    "road_graph_largest_frac": 0.12435500515995872,
+    "poi_placement_self": 0.0,
+    "building_self_intersection": 0.0
+  }
+}
