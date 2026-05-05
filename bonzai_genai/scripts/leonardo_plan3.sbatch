@@ -28,8 +28,10 @@ mkdir -p logs
 source "$WORK/bonzai_genai/.venv/bin/activate"
 cd "$WORK/bonzai_genai"
 
-# Force DDP across all 4 A100s -- boost_usr_prod bills per node, so we
-# saturate the node we already pay for. See feedback_leonardo_full_node.md.
-export BONZAI_DDP_DEVICES=4
+# Default to 4-GPU DDP -- boost_usr_prod bills per node, so we saturate
+# the node we already pay for. See feedback_leonardo_full_node.md. Caller
+# can override by pre-setting BONZAI_DDP_DEVICES (e.g. =1 for diagnostic
+# single-GPU smoke, paired with --gres=gpu:1 --ntasks-per-node=1).
+export BONZAI_DDP_DEVICES="${BONZAI_DDP_DEVICES:-4}"
 
 srun python scripts/_train_runner.py
