@@ -60,12 +60,17 @@ def main() -> None:
     )
     balance_by_country = country_weights is not None
 
+    # 0 = main-process only (safest under DDP — no fork deadlocks on
+    # inherited NCCL handles). Production runs can bump to 2-4 once the
+    # DDP path is stable.
+    num_workers = int(os.environ.get("BONZAI_NUM_WORKERS", "4"))
+
     if stage == "vae":
         from bonzai_genai.training.lit_vae import LitVAE
         lit = LitVAE(vae_config=VAEConfig.from_preset(preset))
         dm = TileDataModule(
             train_url=train_url, val_url=val_url, batch_size=batch_size,
-            return_tokens=False, num_workers=4,
+            return_tokens=False, num_workers=num_workers,
             balance_by_country=balance_by_country,
             country_weights=country_weights,
         )
@@ -86,7 +91,7 @@ def main() -> None:
                 p.requires_grad = False
         dm = TileDataModule(
             train_url=train_url, val_url=val_url, batch_size=batch_size,
-            return_tokens=False, num_workers=4,
+            return_tokens=False, num_workers=num_workers,
             balance_by_country=balance_by_country,
             country_weights=country_weights,
         )
@@ -98,7 +103,7 @@ def main() -> None:
         )
         dm = TileDataModule(
             train_url=train_url, val_url=val_url, batch_size=batch_size,
-            return_tokens=True, num_workers=4,
+            return_tokens=True, num_workers=num_workers,
             max_token_len=InkerConfig.from_preset(preset).max_context_len,
             balance_by_country=balance_by_country,
             country_weights=country_weights,
