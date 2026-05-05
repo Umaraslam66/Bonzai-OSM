@@ -14,6 +14,11 @@ Driven entirely by env-vars set in the sbatch script:
   BONZAI_COUNTRY_WEIGHTS_JSON  (optional) JSON dict country -> sampling weight
                                When set, train DataLoader uses
                                country_balance_filter for per-country balance.
+  BONZAI_FAST_DEV_RUN          (optional) "1" -> Trainer fast_dev_run=True
+                               (1 train + 1 val batch per rank, then exit).
+  BONZAI_LIMIT_TRAIN_BATCHES   (optional) cap batches per epoch. Useful for
+                               smoke runs that still exercise the full
+                               epoch lifecycle (validation, checkpoint).
 """
 from __future__ import annotations
 
@@ -109,6 +114,18 @@ def main() -> None:
         accumulate_grad_batches=int(os.environ.get("BONZAI_GRAD_ACCUM", "1")),
         precision="bf16-mixed",
     )
+    # BONZAI_FAST_DEV_RUN=1 -> runs exactly 1 train + 1 val batch per rank
+    # then exits. Used for DDP smoke tests where the full epoch would
+    # deadlock on uneven shard counts. See: NCCL timeout in smoke v3.
+    if os.environ.get("BONZAI_FAST_DEV_RUN") == "1":
+        trainer_kwargs["fast_dev_run"] = True
+    # BONZAI_LIMIT_TRAIN_BATCHES caps the number of batches per epoch.
+    # Useful for time-budgeted smoke runs that still go through the full
+    # epoch lifecycle (validation, checkpointing).
+    limit_batches = os.environ.get("BONZAI_LIMIT_TRAIN_BATCHES")
+    if limit_batches:
+        trainer_kwargs["limit_train_batches"] = int(limit_batches)
+        trainer_kwargs["limit_val_batches"] = int(limit_batches)
     if devices > 1:
         # Saturate the full Leonardo node — boost_usr_prod bills per node
         # regardless of GPU count. See feedback_leonardo_full_node.md.
