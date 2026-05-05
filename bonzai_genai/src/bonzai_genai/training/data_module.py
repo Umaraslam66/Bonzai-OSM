@@ -131,6 +131,11 @@ class TileDataModule(L.LightningDataModule):
             ds = ds.compose(
                 lambda src: country_balance_filter(src, weights, seed=42 + rank)
             )
+        if training:
+            # Cycle forever so BONZAI_LIMIT_TRAIN_BATCHES decides epoch length;
+            # without this, ranks with uneven shard counts exhaust early under
+            # DDP and the all-reduce hangs at end of epoch.
+            ds = ds.repeat()
         return ds
 
     def setup(self, stage: str) -> None:

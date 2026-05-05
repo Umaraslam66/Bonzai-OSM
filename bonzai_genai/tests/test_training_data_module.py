@@ -192,6 +192,51 @@ def test_data_module_with_balance_flag_runs_end_to_end(syn_corpus):
     assert batch.shape == (2, 9, 512, 512)
 
 
+def test_train_stream_cycles_past_end_of_corpus(syn_corpus):
+    """Train iterator must cycle forever so BONZAI_LIMIT_TRAIN_BATCHES works.
+
+    Under DDP with `limit_train_batches=N` we want N batches per epoch
+    regardless of shard exhaustion. Without `.repeat()` on the train
+    pipeline, ranks that finish their slice early stop iterating, the
+    others hang waiting for an all-reduce, and the run deadlocks.
+
+    Synth corpus has 20 train tiles → 5 batches at batch_size=4. We pull
+    12 batches. Without `.repeat()` this raises StopIteration around batch
+    5; with it, we get all 12.
+    """
+    from bonzai_genai.training.data_module import TileDataModule
+    dm = TileDataModule(
+        train_url=str(syn_corpus / "train" / "shard-{000000..000001}.tar"),
+        val_url=str(syn_corpus / "val" / "shard-000000.tar"),
+        batch_size=4,
+        return_tokens=False,
+        num_workers=0,
+    )
+    dm.setup("fit")
+    it = iter(dm.train_dataloader())
+    for _ in range(12):
+        batch = next(it)
+        assert batch.shape == (4, 9, 512, 512)
+
+
+def test_val_stream_does_not_repeat(syn_corpus):
+    """Val iterator must terminate so Lightning's val epoch ends. Repeating
+    val would make the val loop run forever and never log val/loss.
+    """
+    from bonzai_genai.training.data_module import TileDataModule
+    dm = TileDataModule(
+        train_url=str(syn_corpus / "train" / "shard-{000000..000001}.tar"),
+        val_url=str(syn_corpus / "val" / "shard-000000.tar"),
+        batch_size=4,
+        return_tokens=False,
+        num_workers=0,
+    )
+    dm.setup("fit")
+    # Val corpus = 10 tiles, batch_size=4, partial=False -> exactly 2 batches.
+    batches = list(dm.val_dataloader())
+    assert len(batches) == 2
+
+
 def test_data_module_runs_under_fake_ddp_env(syn_corpus, monkeypatch):
     """Under DDP, env-vars WORLD_SIZE and RANK are set. The data module
     must add wds.split_by_node to keep ranks reading disjoint shards.
