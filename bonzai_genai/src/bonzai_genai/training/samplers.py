@@ -61,6 +61,48 @@ def greedy_inker_sample(
 
 
 @torch.no_grad()
+def greedy_inker_sample_cached(
+    inker,
+    raster_encoder,
+    raster: torch.Tensor,
+    *,
+    max_tokens: int,
+    bos_id: int,
+    eos_id: int,
+) -> torch.Tensor:
+    """Greedy decode using KV cache; output identical to ``greedy_inker_sample``.
+
+    The slow sampler re-runs the full forward over the entire growing
+    sequence on every step (O(N³) per sample). This one keeps per-layer
+    self-attention K/V caches and pre-projects the cross-attention K/V
+    once, so each step is O(N) (a single new query attending to T past
+    keys + raster keys). Constrained-decoding masking is intentionally
+    not yet wired here — the slow sampler stays available for that path
+    until Plan 4.
+    """
+    inker.eval()
+    raster_encoder.eval()
+    device = raster.device
+    bs = raster.shape[0]
+    feat = raster_encoder(raster)
+    feat_seq = feat.flatten(2).transpose(1, 2)
+    cross_kvs = inker.cache_cross_kv(feat_seq)
+    bos = torch.full((bs, 1), bos_id, dtype=torch.long, device=device)
+    out_chunks: list[torch.Tensor] = [bos]
+    next_token = bos
+    past_self_kvs: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+    for pos in range(max_tokens):
+        logits, past_self_kvs = inker.forward_step(
+            next_token, cross_kvs, past_self_kvs, pos,
+        )
+        next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+        out_chunks.append(next_token)
+        if (next_token == eos_id).all():
+            break
+    return torch.cat(out_chunks, dim=1)
+
+
+@torch.no_grad()
 def dpmpp_sample(
     model: nn.Module,
     *,

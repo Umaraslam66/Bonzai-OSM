@@ -265,14 +265,37 @@ def main_sample_from_ckpt() -> None:
     for i in range(n_samples):
         _render_raster_png(rasters[i], out_dir / f"sample_{i:03d}.png")
 
-    print(f"Decoding {n_samples} tiles through Writer (greedy)...", flush=True)
-    for i in range(n_samples):
-        with torch.no_grad():
-            tokens = greedy_inker_sample(
-                inker, raster_encoder, rasters[i:i + 1],
-                max_tokens=inker_max, bos_id=bos, eos_id=eos, constrained=False,
-            )
-        seq = tokens.squeeze(0).tolist()
+    # Decode through the Writer in chunks via the KV-cached sampler. The
+    # original loop called the recompute sampler at batch_size=1 — O(N³) per
+    # sample, which made N=8192 unworkable (job 40942718 timed out at 1 h
+    # with only 2 / 64 sequences decoded). The cached sampler is O(N) per
+    # step; chunking caps peak KV memory while still letting many samples
+    # share a single forward.
+    chunk = int(os.environ.get("BONZAI_SAMPLE_CHUNK", "16"))
+    print(
+        f"Decoding {n_samples} tiles through Writer (cached greedy, chunk={chunk})...",
+        flush=True,
+    )
+    from bonzai_genai.training.samplers import greedy_inker_sample_cached
+    all_seqs: list[list[int]] = []
+    for start in range(0, n_samples, chunk):
+        end = min(start + chunk, n_samples)
+        batch_tokens = greedy_inker_sample_cached(
+            inker, raster_encoder, rasters[start:end],
+            max_tokens=inker_max, bos_id=bos, eos_id=eos,
+        )
+        for row in range(batch_tokens.shape[0]):
+            seq = batch_tokens[row].tolist()
+            # Trim at first EOS so per-sample geometry decode isn't polluted
+            # by post-EOS padding from longer-running siblings in the batch.
+            if eos in seq:
+                seq = seq[: seq.index(eos) + 1]
+            all_seqs.append(seq)
+        print(
+            f"  decoded {end}/{n_samples}",
+            flush=True,
+        )
+    for i, seq in enumerate(all_seqs):
         try:
             geom = tok.decode(list(seq))
             geojson = _geom_to_geojson(geom)

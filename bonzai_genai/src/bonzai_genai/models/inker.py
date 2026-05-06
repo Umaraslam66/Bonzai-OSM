@@ -82,6 +82,43 @@ class InkerSelfAttention(nn.Module):
         out = out.transpose(1, 2).contiguous().view(b, s, self.cfg.hidden_dim)
         return self.out_proj(out)
 
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None,
+        position: int,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """KV-cached one-step forward.
+
+        ``x`` is the embedding of the *single* new token, shape (B, 1, H).
+        ``past_kv`` is the (K, V) of all previously emitted tokens, each
+        shape (B, num_heads, T_past, head_dim); pass None on the first step.
+        ``position`` is the absolute index of the new token in the sequence
+        (= T_past), used to slice the RoPE cache.
+        Returns (out, new_kv) where new_kv is the K,V over T_past+1 tokens.
+        """
+        b = x.shape[0]
+        nh = self.cfg.num_heads
+        hd = self.head_dim
+        q = self.q_proj(x).view(b, 1, nh, hd).transpose(1, 2)
+        k = self.k_proj(x).view(b, 1, nh, hd).transpose(1, 2)
+        v = self.v_proj(x).view(b, 1, nh, hd).transpose(1, 2)
+        rope_slice_cos = cos[position : position + 1]
+        rope_slice_sin = sin[position : position + 1]
+        q = apply_rope(q, rope_slice_cos, rope_slice_sin)
+        k = apply_rope(k, rope_slice_cos, rope_slice_sin)
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, k], dim=2)
+            v = torch.cat([past_v, v], dim=2)
+        # Q is just the new token; K/V is the full history. Causal masking is
+        # implicit because all past keys are by construction earlier.
+        out = nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False)
+        out = out.transpose(1, 2).contiguous().view(b, 1, self.cfg.hidden_dim)
+        return self.out_proj(out), (k, v)
+
 
 class InkerCrossAttention(nn.Module):
     """Cross-attention from token sequence to a flat raster feature grid."""
@@ -103,6 +140,35 @@ class InkerCrossAttention(nn.Module):
         v = self.v_proj(raster_feat).view(b, n, self.cfg.num_heads, self.head_dim).transpose(1, 2)
         out = nn.functional.scaled_dot_product_attention(q, k, v)
         out = out.transpose(1, 2).contiguous().view(b, s, self.cfg.hidden_dim)
+        return self.out_proj(out)
+
+    def cache_kv(
+        self, raster_feat: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pre-project raster K/V once; reuse across decoding steps.
+
+        Cross-attention K/V depends only on the (fixed) raster, so we can
+        compute them once outside the decode loop and reuse the same tensors
+        every step instead of redoing two linear projections per layer per
+        token. Saves O(N_layers × max_tokens) projections per sample.
+        """
+        b, n, _ = raster_feat.shape
+        nh = self.cfg.num_heads
+        hd = self.head_dim
+        k = self.k_proj(raster_feat).view(b, n, nh, hd).transpose(1, 2)
+        v = self.v_proj(raster_feat).view(b, n, nh, hd).transpose(1, 2)
+        return k, v
+
+    def forward_step(
+        self, x: torch.Tensor, cached_kv: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        b = x.shape[0]
+        nh = self.cfg.num_heads
+        hd = self.head_dim
+        q = self.q_proj(x).view(b, 1, nh, hd).transpose(1, 2)
+        k, v = cached_kv
+        out = nn.functional.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(1, 2).contiguous().view(b, 1, self.cfg.hidden_dim)
         return self.out_proj(out)
 
 
@@ -133,6 +199,23 @@ class InkerBlock(nn.Module):
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        cross_kv: tuple[torch.Tensor, torch.Tensor],
+        past_self_kv: tuple[torch.Tensor, torch.Tensor] | None,
+        position: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        sa_out, new_self_kv = self.self_attn.forward_step(
+            self.self_norm(x), cos, sin, past_self_kv, position,
+        )
+        x = x + sa_out
+        x = x + self.cross_attn.forward_step(self.cross_norm(x), cross_kv)
+        x = x + self.ffn(self.ffn_norm(x))
+        return x, new_self_kv
+
 
 class Inker(nn.Module):
     def __init__(self, cfg: InkerConfig):
@@ -155,6 +238,39 @@ class Inker(nn.Module):
             x = block(x, raster_feat, self.rope_cos, self.rope_sin)
         x = self.norm(x)
         return self.head(x)
+
+    def cache_cross_kv(
+        self, raster_feat: torch.Tensor,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Pre-project the raster K/V on every block's cross-attention.
+
+        These tensors are constant across decoding steps and would otherwise
+        be recomputed on every token; caching once eliminates that work.
+        """
+        return [b.cross_attn.cache_kv(raster_feat) for b in self.blocks]
+
+    def forward_step(
+        self,
+        token: torch.Tensor,
+        cross_kvs: list[tuple[torch.Tensor, torch.Tensor]],
+        past_self_kvs: list[tuple[torch.Tensor, torch.Tensor]] | None,
+        position: int,
+    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """KV-cached one-step forward over a single new ``token`` (B, 1).
+
+        Returns ``(logits, new_self_kvs)`` where logits is shape (B, 1, V)
+        and new_self_kvs is the per-layer self-attn cache extended by one.
+        """
+        x = self.embed(token)
+        new_self_kvs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for i, block in enumerate(self.blocks):
+            past = past_self_kvs[i] if past_self_kvs is not None else None
+            x, new_kv = block.forward_step(
+                x, cross_kvs[i], past, position, self.rope_cos, self.rope_sin,
+            )
+            new_self_kvs.append(new_kv)
+        x = self.norm(x)
+        return self.head(x), new_self_kvs
 
 
 # ---------------------------------------------------------------------------
