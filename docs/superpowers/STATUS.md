@@ -1,8 +1,8 @@
 # Bonzai-OSM — Live Status
 
-> **Last updated:** 2026-05-04 (Phase 0b complete — Plan 2 done, Experiment 0 ran green on Leonardo; Plan 3 is next).
+> **Last updated:** 2026-05-06 (Plan 3a Sweden-only ran end-to-end on Leonardo; mixed result; Plan 3b is next).
 >
-> If you are a new agent starting a session: read this file first, then [`PROJECT.md`](../../PROJECT.md), then the [global design spec](specs/2026-05-03-genai-city-infrastructure-design.md), then the most recent hand-off doc — [`bonzai_genai/results/EXPERIMENT_0_REPORT.md`](../../bonzai_genai/results/EXPERIMENT_0_REPORT.md). Plan 3 (Stage A on real data + Stage B on perfect input + Experiments 1-2) is the next thing to draft.
+> If you are a new agent starting a session: read this file first, then [`PROJECT.md`](../../PROJECT.md), then the [global design spec](specs/2026-05-03-genai-city-infrastructure-design.md), then the most recent hand-off doc — [`bonzai_genai/results/PLAN_3_REPORT.md`](../../bonzai_genai/results/PLAN_3_REPORT.md). Plan 3b (fresh multi-country VAE + constrained eval + country conditioning) is the next thing to draft.
 
 ---
 
@@ -11,15 +11,17 @@
 | | |
 |---|---|
 | Branch | `genai-city-model` (long-lived dev branch — **never merge to main**) |
-| Active phase | **Phase 1 — De-risking experiments 1–4 (Plan 3 to be drafted)** |
-| Last completed plan task | **Plan 2 Task 25 — Experiment 0 ran green on Leonardo** (commit `ada9096` for the eval bug-fix; `834bf2b` for the cu121 install note) |
-| Next action | **Draft Plan 3** — Experiments 1 (Sketcher on real data) + 2 (Inker on perfect input). Re-use the existing tiny model code; bump to ~200 M params; train on Sweden + Singapore + Sri Lanka shards. |
-| Tests passing | **102 / 102** (101 + 1 skipped on Leonardo where the SG PBF isn't downloaded) |
-| Ruff lint | **Clean** |
-| GPU-h burned this session | ~1 (Experiment 0 smoke run; well under the 12-30 GPU-h budget) |
-| GPU-h burned cumulative on project | ~15 (14 pre-v1 + 1 this session) |
-| Tile shards on Leonardo | `$WORK/bonzai-tiles/{singapore,sri_lanka,sweden,synth}/` — 1,888 real tiles + 5,000 synth, ~62 GB total |
-| Trained checkpoints | `$WORK/bonzai-exp0/{vae,stage_a,stage_b}/` (tiny smoke models; usable as warm starts in Plan 3) |
+| Active phase | **Phase 1 — De-risking experiments 1–4** |
+| Last completed plan task | **Plan 3a Sweden-only complete** (commits `c0e674e` data_module repeat fix, `97c691c` KV-cached Inker sampler). 64 PNGs + 64 GeoJSONs eval'd; report at [`bonzai_genai/results/PLAN_3_REPORT.md`](../../bonzai_genai/results/PLAN_3_REPORT.md). |
+| Plan 3a verdict | Architecture extracts gradient signal ✅ (Painter loss 52.4→0.26, Writer 6.25→0.0006) but end-to-end pipeline does **not** produce valid samples (0/64 GeoJSONs decoded) — synth-trained VAE + Writer memorisation + unconstrained decoding. |
+| Next action | **Draft Plan 3b** — fresh VAE on Sweden+Singapore+Sri Lanka real corpus; enable mandatory-subset constrained decoding in eval; add country conditioning; retrain Painter+Writer. ~40 node-h estimate. |
+| Tests passing | **129 / 129** (added 2 KV-cache sampler tests + 2 data_module repeat tests) |
+| Ruff lint | clean (last verified pre-Plan-3a; not re-checked after KV-cache commit) |
+| GPU-h burned this session (Plan 3a) | ~9.5 node-h (vs Plan 3 spec's 50) |
+| GPU-h burned cumulative on project | ~25 (15 pre-3a + 9.5 Plan 3a + ~0.5 misc) |
+| Tile shards on Leonardo | `$WORK/bonzai-tiles/{singapore,sri_lanka,sweden,synth}/` — 1,888 real + 5,000 synth |
+| Trained checkpoints (Plan 3a, Sweden-only) | `$WORK/bonzai-plan3a-sweden/{stage_a,stage_b}/lightning_logs/.../checkpoints/epoch=49-step=10000.ckpt` (Painter 1.85 GB, Writer 3.3 GB) |
+| Sample artefacts | local: [`bonzai_genai/results/plan3a-sweden-samples/`](../../bonzai_genai/results/plan3a-sweden-samples/) — 64 PNGs + 64 GeoJSONs |
 
 ## Recent commit history (most recent first)
 
